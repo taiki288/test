@@ -1,0 +1,219 @@
+{
+  "manifestVersion": 1,
+  "kind": "hexa-udon-production",
+  "source": "allowlist",
+  "files": [
+    {
+      "path": "CMakeLists.txt",
+      "sha256": "d5417e20b6c5375c163b2d96ba9b31b46702b5f4514f72bb0c7b18b42b521ede"
+    },
+    {
+      "path": "README.md",
+      "sha256": "b30e3ccb40839cc027fca8f5eac6337621cab93d0cbd042e80e3e766b4cf9866"
+    },
+    {
+      "path": "cmake/CompilerWarnings.cmake",
+      "sha256": "5893a07a15d096d3fa1d721d95d8c99182ec006028a7ceec6851069fd326c667"
+    },
+    {
+      "path": "config/profiles/16x16-one-supply-v1.json",
+      "sha256": "8ac205f4b6c8991036144f46d8dfabc227c34550e05e9c9437855994c83585aa"
+    },
+    {
+      "path": "config/profiles/24x24-two-supply-v1.json",
+      "sha256": "bfbd769f45fb8d443ba6b0c6372c4ac36bfc96aceacccae3ea6bc3ac2becc292"
+    },
+    {
+      "path": "config/profiles/32x32-one-or-three-supply-v1.json",
+      "sha256": "555ba90e99920a664b3c3e94cf9d3fb8de8b3f71e8fb1ddcdb442ad1167b90e7"
+    },
+    {
+      "path": "docs/operations.md",
+      "sha256": "6ef7df3cbfa96841b34ec901a20ee88b451df469a77247a66b5fbcde821149ac"
+    },
+    {
+      "path": "include/hexa_udon/app/auto_client.hpp",
+      "sha256": "04ab6ff169ebac438f0323f3a1f1c5d5990b4ab4735446ecaaa0cab0c0fd4f5c"
+    },
+    {
+      "path": "include/hexa_udon/app/production_profile.hpp",
+      "sha256": "1ee98fec718d5d3f0103fc31ef2ac5c8c404db7e7c5f3235fc7db7f415bbb4c9"
+    },
+    {
+      "path": "include/hexa_udon/core/map_definition.hpp",
+      "sha256": "172f3a19d169e73630d9f9e72785d369e981e16321c89e6d93d9bca35bb0ebef"
+    },
+    {
+      "path": "include/hexa_udon/core/models.hpp",
+      "sha256": "e66289e285cb7bafa52c2a3b1aed1f9ca2305515cc94ec00dbc70490461458cf"
+    },
+    {
+      "path": "include/hexa_udon/core/result.hpp",
+      "sha256": "16aef0e48852968fe5e6f8a31c521e398e7ea1cb9a18ed72306d0f4ff756326e"
+    },
+    {
+      "path": "include/hexa_udon/core/type_candidates.hpp",
+      "sha256": "373f2e39c2f8936f445a5c1ad28ef450f94e2019ffe1c5fe5048f2f8f52bc07f"
+    },
+    {
+      "path": "include/hexa_udon/core/types.hpp",
+      "sha256": "dfe149f5bb7c5e1b3af727402b4293e6c1bdeb39899be37353ec70d1777b125c"
+    },
+    {
+      "path": "include/hexa_udon/optimizer/optimizer.hpp",
+      "sha256": "edc41fd06dbe35618584b299b8567ca33035394dbe3d2f4d4dc188a2a2690ef4"
+    },
+    {
+      "path": "include/hexa_udon/pathfinding/important_point_routes.hpp",
+      "sha256": "55bf88a8f8b6988d7428f0d6616e26ae8d9e883ee2dab673861ba77bdb400389"
+    },
+    {
+      "path": "include/hexa_udon/pathfinding/pathfinder.hpp",
+      "sha256": "338d01296c1ff212cb69f83deebbbaed7aac24c3fdee11da25ca00a48c3ccfa7"
+    },
+    {
+      "path": "include/hexa_udon/planner/greedy_planner.hpp",
+      "sha256": "688271ce5ea0e54fb1df91700fb45d1cd78f287aa18361b800c86dbf3aefbce2"
+    },
+    {
+      "path": "include/hexa_udon/planner/prematch_type_selector.hpp",
+      "sha256": "8bd942286a250c2a3b0db82ceac82a66f429afcbccae84b7959ca56c15ae8b1d"
+    },
+    {
+      "path": "include/hexa_udon/planner/refuel_planner.hpp",
+      "sha256": "1a58261fba05f292c69519935d111479c06138146d0d7126aaecc6cca8cece4a"
+    },
+    {
+      "path": "include/hexa_udon/protocol/api_client.hpp",
+      "sha256": "eccecc06196528ef88e3de27aadca68af8c46cbeb4cd70acecd81946a1f88f86"
+    },
+    {
+      "path": "include/hexa_udon/protocol/http_transport.hpp",
+      "sha256": "6d8c14e77d96fc7b4bf9b0abbd87c21deec3347cd9a30e7ac5e34fa35fb2bb39"
+    },
+    {
+      "path": "include/hexa_udon/protocol/json_codec.hpp",
+      "sha256": "5f7257e9fb84f771bed8728e6fc7c4e9c3d2d71c4f375e2e62f5aabe7fc3de54"
+    },
+    {
+      "path": "include/hexa_udon/protocol/request_control.hpp",
+      "sha256": "14579bc6e3082675b662b15d7d701ac0e64faa6087aad6c0713de0b0d60faa7c"
+    },
+    {
+      "path": "include/hexa_udon/protocol/result.hpp",
+      "sha256": "097e7a45616b154e95bb8b752fca2ec7d774ae96396bb895b43dcbd89f5c0fb2"
+    },
+    {
+      "path": "include/hexa_udon/session/persistence.hpp",
+      "sha256": "80468c3a202d88f46fb73903a85d33f44c9db22c00443a726dff85c6ec690fbb"
+    },
+    {
+      "path": "include/hexa_udon/session/polling.hpp",
+      "sha256": "2defe815fbf33705834fd8ce54b476fbcff59aec01517e54d14150ede6890f5d"
+    },
+    {
+      "path": "include/hexa_udon/session/session.hpp",
+      "sha256": "eed045718c47c28bbc658b991a4ee8f1636546839ecaaf6cfa0c7e3771ae22e6"
+    },
+    {
+      "path": "include/hexa_udon/simulator/action.hpp",
+      "sha256": "2765b15145c6b28901acd7c237e7b77a95254ae1d276965f5d8ffe267e402798"
+    },
+    {
+      "path": "include/hexa_udon/simulator/simulator.hpp",
+      "sha256": "ed5d40d7f888a9b92a48c4dae6c8ed112fc38ff991b7e7dd3ca1111561a49a24"
+    },
+    {
+      "path": "src/app/auto_client.cpp",
+      "sha256": "c329b559b02e529f35b9d4883c4e1e69c26efe4c5887f0dacff0dd50fe1ccf2e"
+    },
+    {
+      "path": "src/app/main.cpp",
+      "sha256": "8b98c3321ed5c870781033868506aaad0a0209a6d2ba9e1a2287c25d98e18758"
+    },
+    {
+      "path": "src/app/production_profile.cpp",
+      "sha256": "bb083c73d371dd302961f9c06c359043f0936b218befc25395bd7d3c9fac8f4a"
+    },
+    {
+      "path": "src/app/session_lock.cpp",
+      "sha256": "7db4ed7959432c514846307ca9c9ff4fdbe9c8294c550852957bfd17e8f88981"
+    },
+    {
+      "path": "src/core/map_definition.cpp",
+      "sha256": "cc38bb2655abcaa4bda1226dfedd2a7f05b0c030410ececcc680e3206cd933ec"
+    },
+    {
+      "path": "src/core/model_validation.cpp",
+      "sha256": "9a8779a66c140c5abb849ce70256b04621d2a698dcfdf32b9671515464747089"
+    },
+    {
+      "path": "src/core/type_candidates.cpp",
+      "sha256": "42352595fff78d37a87c3387af439c75483820b5c08de8e9d2f0bbb5cf76d70a"
+    },
+    {
+      "path": "src/core/types.cpp",
+      "sha256": "a19dda091f3a9e61a3293ea378404291bd5b7b3e6672d279e96739cc10f88ac3"
+    },
+    {
+      "path": "src/optimizer/optimizer.cpp",
+      "sha256": "3393910db14c81b299ca32c31ec6e96d07ee61fdb7aafc9fb9aef6bbe293f4ae"
+    },
+    {
+      "path": "src/pathfinding/important_point_routes.cpp",
+      "sha256": "e3bbb4b99acabbc5df2df99ef9dc0563e825404d67056214eeeaaadd59f20618"
+    },
+    {
+      "path": "src/pathfinding/pathfinder.cpp",
+      "sha256": "8ad37e9e7572c72c5dd3946dde86d193c1b64e1135324e6bc9b765bba3b2a56e"
+    },
+    {
+      "path": "src/planner/greedy_planner.cpp",
+      "sha256": "7a7f92db527a581055f8e4f464fb9ec806898f925b89757c6fcce7e07465b435"
+    },
+    {
+      "path": "src/planner/prematch_type_selector.cpp",
+      "sha256": "907143eedca64d4d86c71e270cc7732d22e7ecc941558a69123753f1662a264b"
+    },
+    {
+      "path": "src/planner/refuel_planner.cpp",
+      "sha256": "7c76890a66095d1e172ec70dd41c53f28c9711ff6cc754b3b4b26061fac733a4"
+    },
+    {
+      "path": "src/protocol/api_client.cpp",
+      "sha256": "8caa3006d77b756f6635da2116c3cad5f1d6b3cc25d3b33e08493f562ed3b3fd"
+    },
+    {
+      "path": "src/protocol/http_transport.cpp",
+      "sha256": "2db6042fde65116b2958ada6ae400aaf4f1e4d8e3f64c0615de5bd4746b11a27"
+    },
+    {
+      "path": "src/protocol/json_codec.cpp",
+      "sha256": "54973b8d85d91d1537517625810bd4028b3ac578d24b41f4048f8570accc7bef"
+    },
+    {
+      "path": "src/protocol/request_control.cpp",
+      "sha256": "38eca2fafa831cb48b860709e2f41e6821c5024128dbce274e4d72ffe03d1266"
+    },
+    {
+      "path": "src/session/persistence.cpp",
+      "sha256": "8e8dc16f479b7618f67d81de5cc30c51f7e664f7ef3336fab4723cd93b2addba"
+    },
+    {
+      "path": "src/session/polling.cpp",
+      "sha256": "74abdcedee51464085dd82b1fa4178e9fab8d3f3a4ed980e74f3e4823498103a"
+    },
+    {
+      "path": "src/session/session.cpp",
+      "sha256": "9e8403e56862804c1064337b9fa89b0e8bf19aa2059b32f9ffeaadf8a0432adb"
+    },
+    {
+      "path": "src/simulator/action.cpp",
+      "sha256": "269ca2d268a20c2c950782a6ff260c0460927a7974904bfa4fbe47ee3a5ce2bb"
+    },
+    {
+      "path": "src/simulator/simulator.cpp",
+      "sha256": "2b2dee54f7f1bb2efb81a7b3cb0cf7e34aec5ae4a2c554f8c8acb6459cf31794"
+    }
+  ]
+}

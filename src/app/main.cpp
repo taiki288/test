@@ -1,0 +1,286 @@
+#include "hexa_udon/app/auto_client.hpp"
+#include "hexa_udon/app/production_profile.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <csignal>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <optional>
+#include <set>
+#include <string>
+
+namespace {
+namespace app = hexa_udon::app;
+namespace protocol = hexa_udon::protocol;
+
+volatile std::sig_atomic_t stop_requested = 0;
+extern "C" void signal_handler(int) { stop_requested = 1; }
+
+struct Options {
+    std::string command;
+    std::string base_url;
+    std::string token_environment = "PROCON_TOKEN";
+    std::filesystem::path session_directory = "run/session";
+    std::filesystem::path log_directory = "run/log";
+    std::optional<std::string> types;
+    std::optional<std::filesystem::path> profile;
+    bool profile_override = false;
+    bool execute = false;
+    std::int64_t poll_ms = 750;
+    std::int64_t connect_timeout_ms = 2000;
+    std::int64_t total_timeout_ms = 5000;
+    std::int64_t safety_seconds = 5;
+    std::size_t max_get_retries = 8;
+    std::string log_level = "info";
+    std::string planner = "wait";
+    std::string type_selector = "fixed";
+    std::int64_t type_selector_ms = 3000;
+    std::size_t type_selector_max_supply = 1;
+    std::size_t type_selector_min_supply = 0;
+    std::int64_t planner_ms = 1500;
+    std::size_t planner_candidates = 2000;
+    std::uint64_t planner_seed = 30013;
+    std::int64_t refuel_ms = 2000;
+    std::size_t refuel_candidates = 2000;
+    std::size_t rendezvous_candidates = 4000;
+    std::size_t max_refuels = 2;
+    std::int64_t optimizer_ms = 5000;
+    std::size_t optimizer_iterations = 10000;
+};
+
+void usage() {
+    std::cerr << "Usage:\n"
+              << "  hexa_udon check --base-url URL [options]\n"
+              << "  hexa_udon auto --base-url URL [--execute] [--types 0,0,0,1] [options]\n"
+              << "  hexa_udon recover --base-url URL --execute [options]\n"
+              << "  hexa_udon show-state --session-dir DIR\n"
+              << "Options: --token-env NAME --session-dir DIR --log-dir DIR --poll-ms N\n"
+              << "         --connect-timeout-ms N --total-timeout-ms N --safety-seconds N\n"
+              << "         --max-get-retries N --log-level info|warning|error\n";
+    std::cerr << "         --planner wait|greedy|greedy-refuel|optimized|daily-improvement --planner-ms N --planner-candidates N --seed N\n"
+              << "         --refuel-ms N --refuel-candidates N --rendezvous-candidates N --max-refuels N\n";
+    std::cerr << "         --optimizer-ms N --optimizer-iterations N\n";
+    std::cerr << "         --type-selector fixed|prematch --type-selector-ms N --type-selector-max-supply 0|1|2\n";
+    std::cerr << "         --type-selector-min-supply 0|1|2 (default 0; must not exceed max)\n";
+    std::cerr << "         --profile FILE (approved size-specific policy; auto only; no tuning overrides)\n";
+}
+
+template <typename T>
+bool parse_integer(const char* text, T& output) {
+    try {
+        std::size_t consumed = 0;
+        const auto value = std::stoll(text, &consumed);
+        if (consumed != std::string{text}.size() || value < 0) return false;
+        output = static_cast<T>(value);
+        return true;
+    } catch (...) { return false; }
+}
+
+std::optional<Options> parse_options(int argc, char** argv) {
+    if (argc < 2) return std::nullopt;
+    Options options;
+    options.command = argv[1];
+    for (int index = 2; index < argc; ++index) {
+        const std::string value = argv[index];
+        if (value.starts_with("--type-selector") || value.starts_with("--planner")
+            || value.starts_with("--refuel") || value.starts_with("--optimizer")
+            || value == "--seed" || value == "--rendezvous-candidates" || value == "--max-refuels"
+            || value == "--poll-ms" || value == "--safety-seconds"
+            || value == "--connect-timeout-ms" || value == "--total-timeout-ms")
+            options.profile_override = true;
+        auto next = [&]() -> const char* { return ++index < argc ? argv[index] : nullptr; };
+        if (value == "--execute") options.execute = true;
+        else if (value == "--base-url") { const auto* item = next(); if (!item) return {}; options.base_url = item; }
+        else if (value == "--token-env") { const auto* item = next(); if (!item) return {}; options.token_environment = item; }
+        else if (value == "--session-dir") { const auto* item = next(); if (!item) return {}; options.session_directory = item; }
+        else if (value == "--log-dir") { const auto* item = next(); if (!item) return {}; options.log_directory = item; }
+        else if (value == "--types") { const auto* item = next(); if (!item) return {}; options.types = item; }
+        else if (value == "--profile") { const auto* item = next(); if (!item || options.profile) return {}; options.profile = item; }
+        else if (value == "--log-level") { const auto* item = next(); if (!item) return {}; options.log_level = item; }
+        else if (value == "--poll-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.poll_ms)) return {}; }
+        else if (value == "--connect-timeout-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.connect_timeout_ms)) return {}; }
+        else if (value == "--total-timeout-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.total_timeout_ms)) return {}; }
+        else if (value == "--safety-seconds") { const auto* item = next(); if (!item || !parse_integer(item, options.safety_seconds)) return {}; }
+        else if (value == "--max-get-retries") { const auto* item = next(); if (!item || !parse_integer(item, options.max_get_retries)) return {}; }
+        else if (value == "--planner") { const auto* item = next(); if (!item) return {}; options.planner = item; }
+        else if (value == "--type-selector") { const auto* item = next(); if (!item) return {}; options.type_selector = item; }
+        else if (value == "--type-selector-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.type_selector_ms)) return {}; }
+        else if (value == "--type-selector-max-supply") { const auto* item = next(); if (!item || !parse_integer(item, options.type_selector_max_supply)) return {}; }
+        else if (value == "--type-selector-min-supply") { const auto* item = next(); if (!item || !parse_integer(item, options.type_selector_min_supply)) return {}; }
+        else if (value == "--planner-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.planner_ms)) return {}; }
+        else if (value == "--planner-candidates") { const auto* item = next(); if (!item || !parse_integer(item, options.planner_candidates)) return {}; }
+        else if (value == "--seed") { const auto* item = next(); if (!item || !parse_integer(item, options.planner_seed)) return {}; }
+        else if (value == "--refuel-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.refuel_ms)) return {}; }
+        else if (value == "--refuel-candidates") { const auto* item = next(); if (!item || !parse_integer(item, options.refuel_candidates)) return {}; }
+        else if (value == "--rendezvous-candidates") { const auto* item = next(); if (!item || !parse_integer(item, options.rendezvous_candidates)) return {}; }
+        else if (value == "--max-refuels") { const auto* item = next(); if (!item || !parse_integer(item, options.max_refuels)) return {}; }
+        else if (value == "--optimizer-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.optimizer_ms)) return {}; }
+        else if (value == "--optimizer-iterations") { const auto* item = next(); if (!item || !parse_integer(item, options.optimizer_iterations)) return {}; }
+        else return std::nullopt;
+    }
+    return options;
+}
+
+bool valid(const Options& options) {
+    if (options.command == "show-state") return !options.execute;
+    if (options.command != "check" && options.command != "auto" && options.command != "recover") return false;
+    if (options.base_url.empty() || options.token_environment.empty()) return false;
+    if (options.poll_ms < 500 || options.connect_timeout_ms <= 0 ||
+        options.total_timeout_ms < options.connect_timeout_ms || options.safety_seconds < 5 ||
+        options.max_get_retries == 0) return false;
+    if (options.log_level != "info" && options.log_level != "warning" && options.log_level != "error") return false;
+    if (options.planner != "wait" && options.planner != "greedy"
+        && options.planner != "greedy-refuel" && options.planner != "optimized"
+        && options.planner != "daily-improvement") return false;
+    if (options.type_selector != "fixed" && options.type_selector != "prematch") return false;
+    if (options.type_selector_ms < 1500) return false;
+    if (options.type_selector_max_supply > 2) return false;
+    if (options.type_selector_min_supply > options.type_selector_max_supply) return false;
+    if (options.type_selector == "prematch" && options.command != "auto") return false;
+    if (options.planner_ms <= 0 || options.planner_candidates == 0) return false;
+    if (options.refuel_ms <= 0 || options.refuel_candidates == 0
+        || options.rendezvous_candidates == 0 || options.max_refuels == 0) return false;
+    if (options.optimizer_ms <= 0 || options.optimizer_iterations == 0) return false;
+    if (options.command == "check" && options.execute) return false;
+    if (options.command == "recover" && !options.execute) return false;
+    return true;
+}
+
+int show_state(const std::filesystem::path& directory) {
+    std::ifstream input(directory / "session.json", std::ios::binary);
+    if (!input) { std::cerr << "No saved session found\n"; return 1; }
+    try {
+        const auto json = nlohmann::json::parse(input);
+        std::cout << "matchId=" << json.at("matchId").get<std::string>() << '\n'
+                  << "lastDay=" << (json.at("lastObservedDay").is_null()
+                                         ? std::string{"none"}
+                                         : std::to_string(json.at("lastObservedDay").get<int>())) << '\n'
+                  << "typesSubmitted=" << (!json.at("submittedAgentKinds").empty() ? "yes" : "no") << '\n';
+        std::set<std::int32_t> match_brands;
+        std::size_t daily_brand_sum = 0;
+        std::int64_t total_balls = 0;
+        bool unknown = json.value("agentKindsUnknown", false);
+        for (const auto& day : json.at("acceptedDays")) {
+            std::cout << "day=" << day.at("day") << " revision=" << day.at("revision")
+                      << " brands=" << day.at("simulation").at("brands").size()
+                      << " balls=" << day.at("simulation").at("totalBalls") << '\n';
+            daily_brand_sum += day.at("simulation").at("brands").size();
+            for (const auto& brand : day.at("simulation").at("brands"))
+                match_brands.insert(brand.get<std::int32_t>());
+            total_balls += day.at("simulation").at("totalBalls").get<std::int64_t>();
+        }
+        for (const auto& submission : json.at("submissions"))
+            unknown = unknown || submission.at("classification").get<int>() == 5;
+        std::cout << "matchBrands=" << match_brands.size()
+                  << " dailyBrandCountSum=" << daily_brand_sum << " totalBalls=" << total_balls
+                  << " unknownResponse=" << (unknown ? "yes" : "no") << '\n';
+        if (!json.at("acceptedDays").empty()) {
+            const auto& agents = json.at("acceptedDays").back().at("simulation").at("endAgents");
+            for (std::size_t index = 0; index < agents.size(); ++index)
+                std::cout << "agent=" << index << " endPos=" << agents[index].at("position")
+                          << " endFuel=" << agents[index].at("fuel") << '\n';
+        }
+        return 0;
+    } catch (const std::exception& exception) {
+        std::cerr << "Invalid saved session: " << exception.what() << '\n';
+        return 1;
+    }
+}
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc == 1 || (argc > 1 && (std::string{argv[1]} == "--help" || std::string{argv[1]} == "help"))) {
+        usage();
+        return 0;
+    }
+    const auto options = parse_options(argc, argv);
+    if (!options || !valid(*options)) { usage(); return 2; }
+    if (options->profile) {
+        if (options->command != "auto" || options->profile_override) {
+            std::cerr << "Profile requires auto and forbids tuning overrides (explicit --types remains allowed)\n";
+            return 2;
+        }
+        try { app::validate_production_profile(*options->profile); }
+        catch (const std::exception&) { std::cerr << "Invalid approved profile schema/identity\n"; return 2; }
+    }
+    if (options->command == "show-state") return show_state(options->session_directory);
+    const char* token = std::getenv(options->token_environment.c_str());
+    if (token == nullptr || *token == '\0') {
+        std::cerr << "Token environment variable is missing or empty\n";
+        return 2;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(options->log_directory, error);
+    if (error) { std::cerr << "Cannot create log directory\n"; return 1; }
+    const auto log_level = options->log_level == "error"
+        ? protocol::OperationLogEntry::Level::Error
+        : options->log_level == "warning" ? protocol::OperationLogEntry::Level::Warning
+                                            : protocol::OperationLogEntry::Level::Info;
+    protocol::FileOperationLogger logger(options->log_directory / "operations.jsonl", log_level);
+    protocol::CurlHttpTransport transport;
+    protocol::ApiConfig api_config{options->base_url, token};
+    api_config.connect_timeout = std::chrono::milliseconds{options->connect_timeout_ms};
+    api_config.total_timeout = std::chrono::milliseconds{options->total_timeout_ms};
+    protocol::ProconApiClient api(transport, api_config, nullptr, &logger);
+    if (options->command == "check") {
+        std::cout << "mode=CHECK baseUrl=" << options->base_url << '\n';
+        const auto setting = api.get_setting();
+        if (!setting) { std::cerr << "connection-check=failed message=" << setting.error().message << '\n'; return 1; }
+        std::cout << "connection-check=ok startsAt=" << setting.value().starts_at
+                  << " agents=" << setting.value().initial_agent_positions.size()
+                  << " days=" << setting.value().day_steps.size() << '\n';
+        return 0;
+    }
+    if (options->command == "recover" && !std::filesystem::exists(options->session_directory / "session.json")) {
+        std::cerr << "Recovery requested but no saved session exists\n";
+        return 2;
+    }
+    std::optional<std::vector<hexa_udon::core::AgentKind>> kinds;
+    if (options->types) {
+        auto parsed = app::parse_kind_list(*options->types);
+        if (!parsed) { std::cerr << parsed.error().message << '\n'; return 2; }
+        kinds = parsed.take();
+    }
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+    app::SystemAppClock clock;
+    app::AutoClientConfig config;
+    config.base_url = options->base_url;
+    config.mode = options->execute ? app::RunMode::Execute : app::RunMode::DryRun;
+    config.state_directory = options->session_directory;
+    config.explicit_kinds = kinds;
+    config.type_selector = options->type_selector == "prematch"
+        ? app::TypeSelectorMode::Prematch : app::TypeSelectorMode::Fixed;
+    config.type_selector_budget = std::chrono::milliseconds{options->type_selector_ms};
+    config.type_selector_max_supply = options->type_selector_max_supply;
+    config.type_selector_min_supply = options->type_selector_min_supply;
+    config.type_submission_reserve = std::chrono::milliseconds{
+        std::max<std::int64_t>(750, options->total_timeout_ms + 250)};
+    config.polling_interval = std::chrono::milliseconds{options->poll_ms};
+    config.safety_margin = std::chrono::seconds{options->safety_seconds};
+    config.maximum_get_attempts = options->max_get_retries;
+    config.planner_mode = options->planner == "daily-improvement" ? app::PlannerMode::DailyImprovement
+        : options->planner == "optimized" ? app::PlannerMode::Optimized
+        : options->planner == "greedy-refuel" ? app::PlannerMode::GreedyRefuel
+        : options->planner == "greedy" ? app::PlannerMode::Greedy : app::PlannerMode::Wait;
+    config.planner_budget = std::chrono::milliseconds{options->planner_ms};
+    config.planner_candidate_limit = options->planner_candidates;
+    config.planner_seed = options->planner_seed;
+    config.refuel_budget = std::chrono::milliseconds{options->refuel_ms};
+    config.refuel_candidate_limit = options->refuel_candidates;
+    config.rendezvous_candidate_limit = options->rendezvous_candidates;
+    config.maximum_refuels_per_patrol = options->max_refuels;
+    config.optimizer_budget = std::chrono::milliseconds{options->optimizer_ms};
+    config.optimizer_iterations = options->optimizer_iterations;
+    if (options->profile) app::apply_production_profile(config, *options->profile);
+    app::AutoCompetitionClient client(api, std::move(config), clock,
+        [] { return stop_requested != 0; }, std::cout, &logger);
+    const auto result = client.run();
+    std::cout << "result=" << static_cast<int>(result.status) << " message=" << result.message << '\n';
+    return result.status == app::RunStatus::Completed ? 0
+         : result.status == app::RunStatus::Stopped ? 130 : 1;
+}
