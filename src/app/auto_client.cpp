@@ -4,6 +4,7 @@
 #include "hexa_udon/planner/prematch_type_selector.hpp"
 #include "hexa_udon/optimizer/optimizer.hpp"
 #include "hexa_udon/optimizer/daily_deadline_policy.hpp"
+#include "hexa_udon/app/production_profile.hpp"
 #include "hexa_udon/protocol/json_codec.hpp"
 
 #include <algorithm>
@@ -54,6 +55,17 @@ std::string stable_hash(const std::string& value) {
     return output.str();
 }
 
+std::string canonical_json_hash(const nlohmann::json& value) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char byte : value.dump()) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    std::ostringstream output;
+    output << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return output.str();
+}
+
 std::string type_identity(const std::vector<core::AgentKind>& kinds) {
     std::string encoded;
     for (const auto kind : kinds) encoded += std::to_string(core::to_int(kind));
@@ -85,6 +97,40 @@ std::string configured_spot_identity(const core::MatchConfig& config) {
     for (const auto& spot : config.spots)
         encoded << spot.brand << ':' << spot.position.value << ':' << spot.max_stock << ',';
     return stable_hash(encoded.str());
+}
+
+nlohmann::json canonical_planner_input(const core::MatchConfig& config,
+                                       const core::DailyState& daily,
+                                       const simulator::MatchProgress& progress,
+                                       const std::vector<core::AgentKind>& kinds,
+                                       std::uint64_t seed, std::int64_t worker_budget_ms) {
+    nlohmann::json map = {{"height", config.map.height()}, {"width", config.map.width()},
+                          {"cells", nlohmann::json::array()}};
+    for (std::int32_t cell = 0; cell < config.map.cell_count(); ++cell)
+        map["cells"].push_back(core::to_int(*config.map.terrain_at({cell})));
+    nlohmann::json spots = nlohmann::json::array();
+    for (const auto& spot : config.spots)
+        spots.push_back({{"brand", spot.brand}, {"position", spot.position.value}, {"stock", spot.max_stock}});
+    nlohmann::json initial = nlohmann::json::array();
+    for (const auto position : config.initial_agent_positions) initial.push_back(position.value);
+    nlohmann::json agents = nlohmann::json::array();
+    for (const auto& agent : daily.own_agents)
+        agents.push_back({{"kind", core::to_int(agent.kind)}, {"position", agent.position.value}, {"fuel", agent.fuel}});
+    nlohmann::json traffic = nlohmann::json::array();
+    for (const auto& road : daily.traffic)
+        traffic.push_back({{"position", road.position.value}, {"status", core::to_int(road.status)}});
+    nlohmann::json type_values = nlohmann::json::array();
+    for (const auto kind : kinds) type_values.push_back(core::to_int(kind));
+    nlohmann::json acquired = nlohmann::json::array();
+    for (const auto brand : progress.acquired_brands) acquired.push_back(brand);
+    return {{"map", map}, {"startsAt", config.starts_at}, {"daySeconds", config.day_seconds},
+            {"daySteps", config.day_steps}, {"spots", spots}, {"initialPositions", initial},
+            {"fuelLimit", config.fuel_limit}, {"players", config.players},
+            {"busyThreshold", config.busy_threshold}, {"jammedThreshold", config.jammed_threshold},
+            {"daily", {{"endsAt", daily.ends_at}, {"day", daily.day}, {"agents", agents}, {"traffic", traffic}}},
+            {"progress", {{"acquiredBrands", acquired}, {"totalBalls", progress.total_balls},
+                           {"dailyDistinctBrandCounts", progress.daily_distinct_brand_counts}}},
+            {"types", type_values}, {"plannerSeed", seed}, {"workerBudgetMs", worker_budget_ms}};
 }
 
 void add_daily_metadata(session::PlannerSubmissionMetadata& metadata,
@@ -288,6 +334,18 @@ RunResult AutoCompetitionClient::run() {
     if (!setting) return {stop_requested_() ? RunStatus::Stopped : RunStatus::Failed,
                           setting.error().message};
     output_ << "session=setting-received startsAt=" << setting.value().starts_at << '\n';
+    if (config_.profile_set_version) {
+        try {
+            apply_v2_profile_set(config_, setting.value(), config_.profile_set_directory,
+                                 *config_.profile_set_version);
+        } catch (const std::exception& exception) {
+            return {RunStatus::Failed, std::string{"profile-set dispatch rejected: "} + exception.what()};
+        }
+        output_ << "profile-dispatch=auto-v2 selected=" << config_.profile_id
+                << " version=" << config_.profile_version
+                << " size=" << config_.required_map_height << 'x' << config_.required_map_width
+                << " agents=" << config_.required_agent_count << '\n';
+    }
     if (config_.require_profile_target) {
         if (static_cast<std::size_t>(setting.value().map.height()) != config_.required_map_height
             || static_cast<std::size_t>(setting.value().map.width()) != config_.required_map_width
@@ -416,6 +474,20 @@ RunResult AutoCompetitionClient::run() {
         metadata.optimizer_status = chosen.optimizer_status;
         metadata.selection_warning = chosen.selection_warning;
         metadata.evaluated_candidates = chosen.evaluated_candidates;
+        metadata.candidate_set_hash = chosen.candidate_set_hash;
+        metadata.configured_budget_milliseconds = chosen.configured_budget_milliseconds;
+        metadata.effective_budget_milliseconds = chosen.effective_budget_milliseconds;
+        metadata.started_remaining_milliseconds = chosen.started_remaining_milliseconds;
+        metadata.baseline_pass_remaining_milliseconds = chosen.baseline_pass_remaining_milliseconds;
+        metadata.final_remaining_milliseconds = chosen.final_remaining_milliseconds;
+        metadata.candidate_enumeration_microseconds = chosen.candidate_enumeration_microseconds;
+        metadata.greedy_microseconds = chosen.greedy_microseconds;
+        metadata.refuel_microseconds = chosen.refuel_microseconds;
+        metadata.optimizer_microseconds = chosen.optimizer_microseconds;
+        metadata.strict_simulator_timing_available = chosen.strict_simulator_timing_available;
+        metadata.second_pass_attempted = chosen.second_pass_attempted;
+        metadata.second_pass_top_k = chosen.second_pass_top_k;
+        metadata.second_pass_reason = chosen.second_pass_reason;
         for (const auto& item : chosen.evaluations) {
             session::TypeCandidateRecord record;
             for (const auto kind : item.candidate.kinds) record.kinds.push_back(core::to_int(kind));
@@ -446,6 +518,18 @@ RunResult AutoCompetitionClient::run() {
                 << " budgetMs=" << config_.type_selector_budget.count()
                 << " postReserveMs=" << config_.type_submission_reserve.count()
                 << " elapsedUs=" << chosen.elapsed.count()
+                << " effectiveBudgetMs=" << chosen.effective_budget_milliseconds
+                << " startRemainingMs=" << chosen.started_remaining_milliseconds
+                << " baselineRemainingMs=" << chosen.baseline_pass_remaining_milliseconds
+                << " finalRemainingMs=" << chosen.final_remaining_milliseconds
+                << " candidateSetHash=" << chosen.candidate_set_hash
+                << " stageUs=enum:" << chosen.candidate_enumeration_microseconds
+                << ",greedy:" << chosen.greedy_microseconds
+                << ",refuel:" << chosen.refuel_microseconds
+                << ",optimizer:" << chosen.optimizer_microseconds
+                << ",simulator:unavailable"
+                << " secondPass=" << (chosen.second_pass_attempted ? "yes" : "no")
+                << " secondPassReason=" << chosen.second_pass_reason
                 << " termination=" << selection_metadata->termination << '\n';
         output_ << "type-selector supply-counts=";
         for (std::size_t supplies = 0; supplies < chosen.total_by_supply_count.size(); ++supplies) {
@@ -525,7 +609,19 @@ RunResult AutoCompetitionClient::run() {
             + ";seed=" + std::to_string(chosen.seed)
             + ";selectorBudgetMs=" + std::to_string(config_.type_selector_budget.count())
             + ";postReserveMs=" + std::to_string(config_.type_submission_reserve.count())
-            + ";positionsHash=" + chosen.initial_positions_hash;
+            + ";positionsHash=" + chosen.initial_positions_hash
+            + ";candidateSetHash=" + chosen.candidate_set_hash
+            + ";effectiveBudgetMs=" + std::to_string(chosen.effective_budget_milliseconds)
+            + ";startRemainingMs=" + std::to_string(chosen.started_remaining_milliseconds)
+            + ";baselineRemainingMs=" + std::to_string(chosen.baseline_pass_remaining_milliseconds)
+            + ";finalRemainingMs=" + std::to_string(chosen.final_remaining_milliseconds)
+            + ";stageUs=enum:" + std::to_string(chosen.candidate_enumeration_microseconds)
+            + ",greedy:" + std::to_string(chosen.greedy_microseconds)
+            + ",refuel:" + std::to_string(chosen.refuel_microseconds)
+            + ",optimizer:" + std::to_string(chosen.optimizer_microseconds)
+            + ",simulator:unavailable"
+            + ";secondPass=" + (chosen.second_pass_attempted ? "yes" : "no")
+            + ";secondPassReason=" + chosen.second_pass_reason;
         selector_log.state_transition = "types-selected-before-agent-post";
         logger_->write(selector_log);
     } else {
@@ -762,6 +858,121 @@ RunResult AutoCompetitionClient::run() {
                 planned.record["effectiveDailyBudgets"] = {{"baselineMaxMs",policy->baseline_max.count()},
                     {"improvementMaxMs",policy->improvement_max.count()}, {"reserveMs",policy->reserve.count()+extra_reserve.count()},
                     {"stageContract","shared-baseline-monotonic-deadline"}};
+                if (!config_.lan_workers.empty() && planned.plan) {
+                    const char* worker_secret = std::getenv(config_.lan_worker_secret_environment.c_str());
+                    nlohmann::json worker_request = {
+                        {"requestId", daily_snapshot_identity(setting.value(), daily.value())},
+                        {"evaluatorVersion", "daily-improvement-candidate-v1"},
+                        {"day", daily.value().day},
+                        {"size", setting.value().map.height()},
+                        {"agentCount", daily.value().own_agents.size()},
+                        {"typeIdentity", type_identity(selected_kinds)},
+                        {"snapshotIdentity", daily_snapshot_identity(setting.value(), daily.value())},
+                        {"mapIdentity", daily_snapshot_identity(setting.value(), daily.value())},
+                        {"stateIdentity", agent_state_identity(daily.value())},
+                        {"policyIdentity", config_.production_policy_identity},
+                        {"workerBudgetMs", policy->improvement_max.count()},
+                        {"futureSnapshotRead", false}, {"lookahead", 0}
+                    };
+                    worker_request["startAgents"] = nlohmann::json::array();
+                    for (const auto& agent : daily.value().own_agents) {
+                        worker_request["startAgents"].push_back({
+                            {"kind", core::to_int(agent.kind)}, {"position", agent.position.value},
+                            {"fuel", agent.fuel}});
+                    }
+                    worker_request["traffic"] = nlohmann::json::array();
+                    for (const auto& road : daily.value().traffic) {
+                        worker_request["traffic"].push_back({
+                            {"position", road.position.value}, {"status", core::to_int(road.status)}});
+                    }
+                    worker_request["plannerInput"] = canonical_planner_input(
+                        setting.value(), daily.value(),
+                        config_.mode == RunMode::DryRun ? policy_dry_progress : competition.progress(),
+                        selected_kinds, config_.planner_seed, policy->improvement_max.count());
+                    worker_request["payloadHash"] = canonical_json_hash(worker_request["plannerInput"]);
+                    bool worker_accepted = false;
+                    std::string worker_reason = "worker-unavailable";
+                    if (worker_secret != nullptr && *worker_secret != '\0') {
+                        for (const auto& endpoint : config_.lan_workers) {
+                            const auto reply = request_lan_worker(endpoint, worker_secret, worker_request,
+                                                                   config_.lan_worker_timeout);
+                            if (reply.success && reply.payload.value("candidateValidated", false)
+                                && reply.payload.value("requestId", "") == worker_request.at("requestId").get<std::string>()
+                                && reply.payload.value("payloadHash", "") == worker_request.at("payloadHash").get<std::string>()) {
+                                try {
+                                    simulator::RawDayActionPlan raw;
+                                    for (const auto& row : reply.payload.at("actions"))
+                                        raw.push_back(row.get<std::vector<std::int32_t>>());
+                                    const auto parsed = simulator::parse_action_plan(raw);
+                                    if (!parsed) { worker_reason = "candidate-action-invalid"; continue; }
+                                    const auto day_steps = setting.value().day_steps.at(
+                                        static_cast<std::size_t>(daily.value().day));
+                                    const simulator::DaySimulationInput sim_input{
+                                        setting.value().map, setting.value().spots, setting.value().fuel_limit,
+                                        day_steps, daily.value().own_agents, daily.value().traffic};
+                                    const auto simulation = simulator::simulate_day(sim_input, parsed.value());
+                                    if (!simulation) { worker_reason = "candidate-simulator-rejected"; continue; }
+                                    std::vector<std::vector<std::size_t>> visited(simulation.value().acquisitions.size());
+                                    for (std::size_t index = 0; index < visited.size(); ++index)
+                                        visited[index] = simulation.value().acquisitions[index].spot_indices;
+                                    const auto score = planner::official_score(
+                                        config_.mode == RunMode::DryRun ? policy_dry_progress : competition.progress(),
+                                        simulation.value());
+                                    const auto readiness = planner::daily_readiness(
+                                        setting.value(), daily.value(), simulation.value(), visited);
+                                    nlohmann::json end_agents = nlohmann::json::array();
+                                    for (const auto& agent : simulation.value().end_agents)
+                                        end_agents.push_back({{"kind", core::to_int(agent.kind)},
+                                                              {"position", agent.position.value}, {"fuel", agent.fuel}});
+                                    const auto action_hash = canonical_json_hash(reply.payload.at("actions"));
+                                    const auto plan_hash = canonical_json_hash({{"actions", reply.payload.at("actions")},
+                                                                                {"types", selected_kinds.size()}});
+                                    const auto end_hash = canonical_json_hash(end_agents);
+                                    const auto claim_score = reply.payload.at("officialScore").get<std::vector<std::int64_t>>();
+                                    const auto claim_readiness = reply.payload.at("readiness").get<std::vector<std::int64_t>>();
+                                    const bool claims_match = claim_score == std::vector<std::int64_t>{
+                                        score.total_unique_brands, score.cumulative_daily_unique_brands, score.total_bowls}
+                                        && claim_readiness == std::vector<std::int64_t>{
+                                            readiness.uncollected_spot_reachability, readiness.fuel_reserve,
+                                            readiness.patrol_dispersion, readiness.rendezvous_readiness}
+                                        && reply.payload.value("actionHash", "") == action_hash
+                                        && reply.payload.value("planHash", "") == plan_hash
+                                        && reply.payload.value("endStateHash", "") == end_hash;
+                                    if (!claims_match) { worker_reason = "candidate-claims-mismatch"; continue; }
+                                    const auto score_values = planned.record.value("score", std::vector<std::int64_t>{0, 0, 0});
+                                    const auto readiness_values = planned.record.value("readiness", std::vector<std::int64_t>{0, 0, 0, 0});
+                                    if (score_values.size() != 3 || readiness_values.size() != 4) {
+                                        worker_reason = "baseline-claims-missing"; continue;
+                                    }
+                                    const auto baseline_score = planner::OfficialScore{
+                                        score_values[0], score_values[1], score_values[2]};
+                                    const auto baseline_readiness = planner::DailyReadiness{
+                                        readiness_values[0], readiness_values[1], readiness_values[2], readiness_values[3], {}};
+                                    const auto candidate_better = planner::better_official_score(score, baseline_score);
+                                    const auto candidate_tie_better = score == baseline_score
+                                        && planner::better_daily_readiness(readiness, baseline_readiness);
+                                    if (candidate_better || candidate_tie_better) {
+                                        planned.plan = parsed.value();
+                                        planned.simulation = simulation.value();
+                                        planned.record["lanWorkerCandidate"] = {
+                                            {"actionHash", action_hash}, {"endStateHash", end_hash},
+                                            {"adoptionReason", candidate_better ? "official-score-improved" : "readiness-tie-break"}};
+                                        worker_accepted = true;
+                                        worker_reason = "worker-candidate-adopted";
+                                    } else worker_reason = "baseline-retained-lower-or-equal-candidate";
+                                } catch (...) { worker_reason = "candidate-response-schema-invalid"; }
+                                if (worker_accepted) break;
+                            }
+                            if (!reply.error.empty()) worker_reason = reply.error;
+                        }
+                    }
+                    planned.record["lanWorker"] = {
+                        {"requested", true}, {"accepted", worker_accepted},
+                        {"fallback", !worker_accepted}, {"reason", worker_reason},
+                        {"workerCount", config_.lan_workers.size()}
+                    };
+                    if (!worker_accepted) output_ << "lan-worker baseline-retained reason=" << worker_reason << '\n';
+                }
                 competition.record_daily_planning(planned.record);
                 output_ << "daily-deadline " << planned.record.dump() << '\n';
                 protocol::OperationLogEntry entry;

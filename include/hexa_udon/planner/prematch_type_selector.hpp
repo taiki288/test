@@ -75,6 +75,21 @@ struct PreMatchTypeSelectionResult {
     bool confidence_limited = false;
     std::uint64_t seed = 0;
     std::string initial_positions_hash;
+    std::string candidate_set_hash;
+    std::int64_t configured_budget_milliseconds = 0;
+    std::int64_t effective_budget_milliseconds = 0;
+    std::int64_t post_reserve_milliseconds = 0;
+    std::int64_t started_remaining_milliseconds = 0;
+    std::int64_t baseline_pass_remaining_milliseconds = 0;
+    std::int64_t final_remaining_milliseconds = 0;
+    std::int64_t candidate_enumeration_microseconds = 0;
+    std::int64_t greedy_microseconds = 0;
+    std::int64_t refuel_microseconds = 0;
+    std::int64_t optimizer_microseconds = 0;
+    bool strict_simulator_timing_available = false;
+    bool second_pass_attempted = false;
+    std::size_t second_pass_top_k = 0;
+    std::string second_pass_reason = "not-configured-type-selector-plan-unit";
     std::chrono::microseconds elapsed{0};
 };
 

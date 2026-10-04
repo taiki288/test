@@ -5,6 +5,7 @@
 #include "hexa_udon/session/polling.hpp"
 #include "hexa_udon/session/session.hpp"
 #include "hexa_udon/optimizer/daily_deadline_policy.hpp"
+#include "hexa_udon/app/lan_worker.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -54,10 +55,15 @@ struct AutoClientConfig {
     bool require_profile_target = false;
     std::string profile_id;
     int profile_version = 1;
+    std::optional<std::string> profile_set_version;
+    std::filesystem::path profile_set_directory{"config/profiles"};
     nlohmann::json production_policy_identity = nullptr;
     std::size_t required_map_height = 0;
     std::size_t required_map_width = 0;
     std::size_t required_agent_count = 0;
+    std::vector<LanWorkerEndpoint> lan_workers;
+    std::string lan_worker_secret_environment;
+    std::chrono::milliseconds lan_worker_timeout{250};
 };
 
 struct RunResult {

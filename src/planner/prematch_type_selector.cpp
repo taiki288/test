@@ -81,6 +81,26 @@ std::string positions_hash(const core::DailyState& daily) {
     return out.str();
 }
 
+std::string candidate_set_hash(const std::vector<TypeCandidate>& candidates) {
+    std::string value;
+    for (const auto& candidate : candidates) {
+        for (const auto kind : candidate.kinds) {
+            value += std::to_string(core::to_int(kind));
+            value.push_back(',');
+        }
+        value.push_back(';');
+    }
+    std::ostringstream out;
+    out << std::hex << std::setw(16) << std::setfill('0') << fnv1a(value);
+    return out.str();
+}
+
+std::int64_t milliseconds_between(std::chrono::steady_clock::time_point later,
+                                  std::chrono::steady_clock::time_point earlier) {
+    const auto value = std::chrono::duration_cast<std::chrono::milliseconds>(later - earlier).count();
+    return std::max<std::int64_t>(0, value);
+}
+
 bool all_clear_day_zero(const core::MatchConfig& match, const core::DailyState& daily) {
     if (daily.day != 0) return false;
     const auto validation = core::validate(daily, match);
@@ -213,7 +233,9 @@ TypeSelectionOutcome select_types_for_match(
                 "Day0 state positions differ from the received setting's official agent order"});
         }
     }
+    const auto enumeration_started = std::chrono::steady_clock::now();
     const auto candidates = make_type_candidates(input_daily.own_agents.size(), config);
+    const auto enumeration_finished = std::chrono::steady_clock::now();
     if (candidates.empty()) return TypeSelectionOutcome::failure(
         {TypeSelectorErrorCode::NoCandidates, "no bounded type candidates are configured"});
 
@@ -221,6 +243,14 @@ TypeSelectionOutcome select_types_for_match(
     result.seed = config.seed;
     result.initial_positions_hash = positions_hash(input_daily);
     result.total_candidates = candidates.size();
+    result.candidate_set_hash = candidate_set_hash(candidates);
+    result.candidate_enumeration_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(
+        enumeration_finished - enumeration_started).count();
+    result.configured_budget_milliseconds = config.selector_budget.count();
+    result.post_reserve_milliseconds = config.safety_reserve.count();
+    const auto configured_deadline = std::min(deadline, started + config.selector_budget);
+    result.effective_budget_milliseconds = milliseconds_between(configured_deadline, started);
+    result.started_remaining_milliseconds = result.effective_budget_milliseconds;
     const auto maximum_count = config.maximum_supply_agents;
     result.total_by_supply_count.assign(maximum_count + 1, 0);
     result.evaluated_by_supply_count.assign(maximum_count + 1, 0);
@@ -245,7 +275,6 @@ TypeSelectionOutcome select_types_for_match(
     std::vector<std::optional<PlannerResult>> greedies(candidates.size());
     std::vector<std::optional<RefuelPlannerResult>> refuels(candidates.size());
     std::vector<std::size_t> evaluated_indices;
-    const auto configured_deadline = std::min(deadline, started + config.selector_budget);
     const auto safe_deadline = configured_deadline - config.safety_reserve;
     const auto candidate_phase_budget = std::chrono::duration_cast<std::chrono::milliseconds>(
         safe_deadline - now()) / static_cast<std::int64_t>(candidates.size());
@@ -261,6 +290,8 @@ TypeSelectionOutcome select_types_for_match(
         fallback_evaluation.explanation = "verified wait fallback respecting minimum supply; candidate set not fairly evaluable";
         result.evaluations.push_back(std::move(fallback_evaluation));
         result.elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now() - started);
+        result.baseline_pass_remaining_milliseconds = milliseconds_between(configured_deadline, now());
+        result.final_remaining_milliseconds = result.baseline_pass_remaining_milliseconds;
         return TypeSelectionOutcome::success(std::move(result));
     }
     bool candidate_budget_overrun = false;
@@ -271,8 +302,11 @@ TypeSelectionOutcome select_types_for_match(
         for (std::size_t i = 0; i < daily.own_agents.size(); ++i)
             daily.own_agents[i].kind = candidates[candidate_index].kinds[i];
         const auto stop = std::min(safe_deadline, now() + fair_candidate_budget);
+        const auto greedy_started = std::chrono::steady_clock::now();
         const auto greedy = make_greedy_plan({match, daily, previous_progress},
             {config.greedy_candidate_limit, config.seed}, stop, now);
+        result.greedy_microseconds += std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - greedy_started).count();
         if (now() > stop) { candidate_budget_overrun = true; break; }
         if (!greedy) {
             result.selection_warning = "greedy construction failed for one or more candidates";
@@ -291,9 +325,12 @@ TypeSelectionOutcome select_types_for_match(
             evaluated.termination = "greedy-day0-verified";
             evaluated.explanation = "zero-supply candidate evaluated with Greedy; Refuel phase omitted";
         } else {
+            const auto refuel_started = std::chrono::steady_clock::now();
             const auto refuel = make_refuel_plan({match, daily, previous_progress}, greedy.value(),
                 {config.refuel_candidate_limit, config.rendezvous_candidate_limit,
                  config.maximum_refuels_per_patrol, config.seed}, stop, now);
+            result.refuel_microseconds += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - refuel_started).count();
             if (now() > stop) { candidate_budget_overrun = true; break; }
             if (!refuel) {
                 result.selection_warning = "refuel planner failed for one or more candidates";
@@ -335,8 +372,12 @@ TypeSelectionOutcome select_types_for_match(
         result.confidence_limited = true;
         result.termination = TypeSelectionTermination::Fallback;
         result.elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now() - started);
+        result.baseline_pass_remaining_milliseconds = milliseconds_between(configured_deadline, now());
+        result.final_remaining_milliseconds = result.baseline_pass_remaining_milliseconds;
         return TypeSelectionOutcome::success(std::move(result));
     }
+
+    result.baseline_pass_remaining_milliseconds = milliseconds_between(configured_deadline, now());
 
     const auto optimizer_budget_total = config.optimizer_budget_per_candidate
         * static_cast<std::int64_t>(candidates.size());
@@ -363,8 +404,11 @@ TypeSelectionOutcome select_types_for_match(
             optimizer_config.maximum_iterations = config.optimizer_iterations;
             const auto stop = std::min(safe_deadline,
                                        now() + config.optimizer_budget_per_candidate);
+            const auto optimizer_started = std::chrono::steady_clock::now();
             const auto optimized = optimizer::optimize({match, daily, previous_progress},
                 *greedies[index], *refuels[index], optimizer_config, stop, now);
+            result.optimizer_microseconds += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - optimizer_started).count();
             if (!optimized || now() > stop) {
                 fair_optimizer_pass = false;
                 break;
@@ -431,6 +475,7 @@ TypeSelectionOutcome select_types_for_match(
         result.selected = std::move(all_patrol);
     }
     result.elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now() - started);
+    result.final_remaining_milliseconds = milliseconds_between(configured_deadline, now());
     return TypeSelectionOutcome::success(std::move(result));
 }
 

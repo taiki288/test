@@ -129,6 +129,20 @@ struct TypeSelectionMetadata {
     std::string optimizer_status = "unknown-legacy";
     std::string selection_warning;
     std::size_t evaluated_candidates = 0;
+    std::string candidate_set_hash;
+    std::int64_t configured_budget_milliseconds = 0;
+    std::int64_t effective_budget_milliseconds = 0;
+    std::int64_t started_remaining_milliseconds = 0;
+    std::int64_t baseline_pass_remaining_milliseconds = 0;
+    std::int64_t final_remaining_milliseconds = 0;
+    std::int64_t candidate_enumeration_microseconds = 0;
+    std::int64_t greedy_microseconds = 0;
+    std::int64_t refuel_microseconds = 0;
+    std::int64_t optimizer_microseconds = 0;
+    bool strict_simulator_timing_available = false;
+    bool second_pass_attempted = false;
+    std::size_t second_pass_top_k = 0;
+    std::string second_pass_reason;
     std::vector<TypeCandidateRecord> candidates;
 };
 

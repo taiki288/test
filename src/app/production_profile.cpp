@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <stdexcept>
+#include <set>
 namespace hexa_udon::app {
 namespace {
 bool validate_32_profile(const nlohmann::json& supplied) {
@@ -365,6 +366,46 @@ void apply_production_profile(AutoClientConfig& config, const std::filesystem::p
     config.safety_margin = std::chrono::seconds{profile.at("safetyMarginSeconds").get<int>()};
     if (profile.contains("typeSubmissionReserveMs"))
         config.type_submission_reserve = std::chrono::milliseconds{profile.at("typeSubmissionReserveMs").get<int>()};
+}
+
+void apply_v2_profile_set(AutoClientConfig& config, const core::MatchConfig& setting,
+                          const std::filesystem::path& directory, const std::string& version) {
+    if (version != "v2") throw std::runtime_error("unsupported profile-set version");
+    struct Candidate { std::filesystem::path path; nlohmann::json value; };
+    const std::vector<std::string> names{
+        "16x16-one-supply-v2.json", "24x24-two-supply-v2.json",
+        "32x32-one-or-three-supply-v2.json"};
+    std::vector<Candidate> profiles;
+    std::set<std::pair<int, int>> targets;
+    std::set<std::string> ids;
+    for (const auto& name : names) {
+        const auto path = directory / name;
+        std::ifstream input(path);
+        if (!input || std::filesystem::file_size(path) > 65536)
+            throw std::runtime_error("v2 profile-set file missing or too large");
+        nlohmann::json value;
+        try { input >> value; } catch (...) { throw std::runtime_error("v2 profile-set JSON is invalid"); }
+        validate_profile_json(value);
+        if (value.value("profileVersion", 0) != 2
+            || value.value("status", "") != "human-approved-provisional")
+            throw std::runtime_error("v2 profile-set contains a non-v2 profile");
+        const auto target = value.value("target", nlohmann::json::object());
+        const auto height = target.value("height", 0);
+        const auto width = target.value("width", 0);
+        if (!targets.emplace(height, width).second
+            || !ids.emplace(value.value("profileId", "")).second)
+            throw std::runtime_error("v2 profile-set has duplicate identity");
+        profiles.push_back({path, std::move(value)});
+    }
+    const auto match = std::find_if(profiles.begin(), profiles.end(), [&](const Candidate& candidate) {
+        const auto target = candidate.value.at("target");
+        return target.at("height").get<int>() == setting.map.height()
+            && target.at("width").get<int>() == setting.map.width()
+            && target.at("agents").get<std::size_t>() == setting.initial_agent_positions.size();
+    });
+    if (match == profiles.end())
+        throw std::runtime_error("setting size/agent count has no approved v2 profile");
+    apply_production_profile(config, match->path);
 }
 void apply_16x16_production_profile(AutoClientConfig& config) {
     const auto profile = nlohmann::json::parse(approved_profile);

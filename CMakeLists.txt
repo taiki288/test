@@ -51,7 +51,7 @@ add_library(hexa_udon_session src/session/session.cpp src/session/polling.cpp sr
 target_include_directories(hexa_udon_session PUBLIC include)
 target_link_libraries(hexa_udon_session PUBLIC hexa_udon_protocol hexa_udon_simulator nlohmann_json::nlohmann_json)
 hexa_udon_enable_warnings(hexa_udon_session)
-add_library(hexa_udon_app src/app/auto_client.cpp src/app/session_lock.cpp src/app/production_profile.cpp)
+add_library(hexa_udon_app src/app/auto_client.cpp src/app/session_lock.cpp src/app/production_profile.cpp src/app/lan_worker.cpp)
 target_include_directories(hexa_udon_app PUBLIC include)
 target_link_libraries(hexa_udon_app PUBLIC hexa_udon_session hexa_udon_planner hexa_udon_refuel_planner hexa_udon_optimizer hexa_udon_prematch_selector)
 hexa_udon_enable_warnings(hexa_udon_app)

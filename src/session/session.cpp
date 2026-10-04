@@ -88,6 +88,20 @@ Json type_selection_json(const TypeSelectionMetadata& selection) {
             {"optimizerStatus", selection.optimizer_status},
             {"selectionWarning", selection.selection_warning},
             {"evaluatedCandidates", selection.evaluated_candidates},
+            {"candidateSetHash", selection.candidate_set_hash},
+            {"configuredBudgetMilliseconds", selection.configured_budget_milliseconds},
+            {"effectiveBudgetMilliseconds", selection.effective_budget_milliseconds},
+            {"startedRemainingMilliseconds", selection.started_remaining_milliseconds},
+            {"baselinePassRemainingMilliseconds", selection.baseline_pass_remaining_milliseconds},
+            {"finalRemainingMilliseconds", selection.final_remaining_milliseconds},
+            {"candidateEnumerationMicroseconds", selection.candidate_enumeration_microseconds},
+            {"greedyMicroseconds", selection.greedy_microseconds},
+            {"refuelMicroseconds", selection.refuel_microseconds},
+            {"optimizerMicroseconds", selection.optimizer_microseconds},
+            {"strictSimulatorTimingAvailable", selection.strict_simulator_timing_available},
+            {"secondPassAttempted", selection.second_pass_attempted},
+            {"secondPassTopK", selection.second_pass_top_k},
+            {"secondPassReason", selection.second_pass_reason},
             {"maximumSupplyAgents", selection.maximum_supply_agents},
             {"minimumSupplyAgents", selection.minimum_supply_agents},
             {"allowedSupplyCounts", selection.allowed_supply_counts},
@@ -648,6 +662,20 @@ protocol::Result<bool> SessionController::restore(const std::filesystem::path& p
             selection.optimizer_status = selection_json.value("optimizerStatus", std::string{"unknown-legacy"});
             selection.selection_warning = selection_json.value("selectionWarning", std::string{});
             selection.evaluated_candidates = selection_json.value("evaluatedCandidates", std::size_t{0});
+            selection.candidate_set_hash = selection_json.value("candidateSetHash", std::string{});
+            selection.configured_budget_milliseconds = selection_json.value("configuredBudgetMilliseconds", selection.budget_milliseconds);
+            selection.effective_budget_milliseconds = selection_json.value("effectiveBudgetMilliseconds", selection.budget_milliseconds);
+            selection.started_remaining_milliseconds = selection_json.value("startedRemainingMilliseconds", selection.effective_budget_milliseconds);
+            selection.baseline_pass_remaining_milliseconds = selection_json.value("baselinePassRemainingMilliseconds", 0LL);
+            selection.final_remaining_milliseconds = selection_json.value("finalRemainingMilliseconds", 0LL);
+            selection.candidate_enumeration_microseconds = selection_json.value("candidateEnumerationMicroseconds", 0LL);
+            selection.greedy_microseconds = selection_json.value("greedyMicroseconds", 0LL);
+            selection.refuel_microseconds = selection_json.value("refuelMicroseconds", 0LL);
+            selection.optimizer_microseconds = selection_json.value("optimizerMicroseconds", 0LL);
+            selection.strict_simulator_timing_available = selection_json.value("strictSimulatorTimingAvailable", false);
+            selection.second_pass_attempted = selection_json.value("secondPassAttempted", false);
+            selection.second_pass_top_k = selection_json.value("secondPassTopK", std::size_t{0});
+            selection.second_pass_reason = selection_json.value("secondPassReason", std::string{"legacy-unknown"});
             if (selection.fallback_reason == "optimizer phase skipped to preserve equal budgets across candidates") {
                 selection.optimizer_status = "skipped-for-fairness";
                 selection.fallback_reason.clear();

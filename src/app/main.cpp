@@ -1,5 +1,6 @@
 #include "hexa_udon/app/auto_client.hpp"
 #include "hexa_udon/app/production_profile.hpp"
+#include "hexa_udon/app/lan_worker.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -28,6 +29,7 @@ struct Options {
     std::filesystem::path log_directory = "run/log";
     std::optional<std::string> types;
     std::optional<std::filesystem::path> profile;
+    std::optional<std::string> profile_set;
     bool profile_override = false;
     bool daily_deadline_policy = false;
     bool execute = false;
@@ -51,6 +53,10 @@ struct Options {
     std::size_t max_refuels = 2;
     std::int64_t optimizer_ms = 5000;
     std::size_t optimizer_iterations = 10000;
+    std::optional<std::string> worker_listen;
+    std::string worker_token_environment;
+    std::vector<std::string> lan_worker_values;
+    std::int64_t lan_worker_timeout_ms = 250;
 };
 
 void usage() {
@@ -60,6 +66,7 @@ void usage() {
               << "  hexa_udon recover --base-url URL [options] (dry-run by default)\n"
               << "  hexa_udon show-state --session-dir DIR\n"
               << "  hexa_udon validate-profile --profile FILE (offline; no token or HTTP)\n"
+              << "  hexa_udon worker --listen 127.0.0.1:PORT --worker-token-env NAME\n"
               << "Options: --token-env NAME --session-dir DIR --log-dir DIR --poll-ms N\n"
               << "         --connect-timeout-ms N --total-timeout-ms N --safety-seconds N\n"
               << "         --max-get-retries N --log-level info|warning|error\n";
@@ -70,6 +77,8 @@ void usage() {
     std::cerr << "         --type-selector fixed|prematch --type-selector-ms N --type-selector-max-supply 0|1|2\n";
     std::cerr << "         --type-selector-min-supply 0|1|2 (default 0; must not exceed max)\n";
     std::cerr << "         --profile FILE (approved v1/v2 policy; auto/recover; no tuning overrides; 32x32 profile uses [1,3])\n";
+    std::cerr << "         --profile-set v2 (auto only; select approved v2 profile from the first /setting response)\n";
+    std::cerr << "         --lan-worker HOST:PORT (daily-improvement opt-in; repeatable) --lan-worker-timeout-ms N\n";
 }
 
 template <typename T>
@@ -104,6 +113,7 @@ std::optional<Options> parse_options(int argc, char** argv) {
         else if (value == "--log-dir") { const auto* item = next(); if (!item) return {}; options.log_directory = item; }
         else if (value == "--types") { const auto* item = next(); if (!item) return {}; options.types = item; }
         else if (value == "--profile") { const auto* item = next(); if (!item || options.profile) return {}; options.profile = item; }
+        else if (value == "--profile-set") { const auto* item = next(); if (!item || options.profile_set) return {}; options.profile_set = item; }
         else if (value == "--log-level") { const auto* item = next(); if (!item) return {}; options.log_level = item; }
         else if (value == "--poll-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.poll_ms)) return {}; }
         else if (value == "--connect-timeout-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.connect_timeout_ms)) return {}; }
@@ -124,12 +134,28 @@ std::optional<Options> parse_options(int argc, char** argv) {
         else if (value == "--max-refuels") { const auto* item = next(); if (!item || !parse_integer(item, options.max_refuels)) return {}; }
         else if (value == "--optimizer-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.optimizer_ms)) return {}; }
         else if (value == "--optimizer-iterations") { const auto* item = next(); if (!item || !parse_integer(item, options.optimizer_iterations)) return {}; }
+        else if (value == "--listen") { const auto* item = next(); if (!item || options.worker_listen) return {}; options.worker_listen = item; }
+        else if (value == "--worker-token-env") { const auto* item = next(); if (!item || !options.worker_token_environment.empty()) return {}; options.worker_token_environment = item; }
+        else if (value == "--lan-worker") { const auto* item = next(); if (!item) return {}; options.lan_worker_values.emplace_back(item); }
+        else if (value == "--lan-worker-timeout-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.lan_worker_timeout_ms)) return {}; }
         else return std::nullopt;
     }
     return options;
 }
 
 bool valid(const Options& options) {
+    if (options.command == "worker") {
+        return options.worker_listen.has_value() && !options.worker_token_environment.empty()
+            && !options.execute && options.base_url.empty() && options.profile == std::nullopt
+            && options.profile_set == std::nullopt && options.lan_worker_values.empty()
+            && options.token_environment == "PROCON_TOKEN"
+            && app::parse_lan_worker_endpoint(*options.worker_listen).has_value();
+    }
+    if (!options.lan_worker_values.empty() && options.command != "auto") return false;
+    if (!options.lan_worker_values.empty() && options.planner != "daily-improvement"
+        && !options.profile && !options.profile_set) return false;
+    if (options.lan_worker_timeout_ms <= 0 || options.lan_worker_timeout_ms > 30000) return false;
+    if (options.profile_set && (options.command != "auto" || *options.profile_set != "v2" || options.profile)) return false;
     if (options.command == "validate-profile") return options.profile.has_value() && !options.execute && !options.profile_override;
     if (options.daily_deadline_policy && (options.command != "auto" || options.planner != "daily-improvement" || options.profile)) return false;
     if (options.command == "show-state") return !options.execute;
@@ -204,6 +230,13 @@ int main(int argc, char** argv) {
     }
     const auto options = parse_options(argc, argv);
     if (!options || !valid(*options)) { usage(); return 2; }
+    if (options->command == "worker") {
+        const auto endpoint = app::parse_lan_worker_endpoint(*options->worker_listen);
+        if (!endpoint) { std::cerr << "worker requires a private or loopback listen address\n"; return 2; }
+        std::signal(SIGINT, signal_handler); std::signal(SIGTERM, signal_handler);
+        return app::run_lan_worker({*endpoint, options->worker_token_environment, 262144},
+                                   [] { return stop_requested != 0; }, std::cout);
+    }
     if (options->profile) {
         if ((options->command != "auto" && options->command != "recover" && options->command != "validate-profile") || options->profile_override) {
             std::cerr << "Profile requires auto/recover and forbids tuning overrides (explicit --types remains allowed)\n";
@@ -262,6 +295,7 @@ int main(int argc, char** argv) {
     config.mode = options->execute ? app::RunMode::Execute : app::RunMode::DryRun;
     config.state_directory = options->session_directory;
     config.explicit_kinds = kinds;
+    config.profile_set_version = options->profile_set;
     config.type_selector = options->type_selector == "prematch"
         ? app::TypeSelectorMode::Prematch : app::TypeSelectorMode::Fixed;
     config.type_selector_budget = std::chrono::milliseconds{options->type_selector_ms};
@@ -286,6 +320,21 @@ int main(int argc, char** argv) {
     config.maximum_refuels_per_patrol = options->max_refuels;
     config.optimizer_budget = std::chrono::milliseconds{options->optimizer_ms};
     config.optimizer_iterations = options->optimizer_iterations;
+    for (const auto& value : options->lan_worker_values) {
+        const auto endpoint = app::parse_lan_worker_endpoint(value);
+        if (!endpoint) { std::cerr << "Invalid private LAN worker endpoint\n"; return 2; }
+        config.lan_workers.push_back(*endpoint);
+    }
+    config.lan_worker_timeout = std::chrono::milliseconds{options->lan_worker_timeout_ms};
+    if (!config.lan_workers.empty() && config.planner_mode != app::PlannerMode::DailyImprovement) {
+        std::cerr << "--lan-worker requires --planner daily-improvement\n"; return 2;
+    }
+    if (!config.lan_workers.empty()) {
+        config.lan_worker_secret_environment = "HEXA_LAN_WORKER_SECRET";
+        if (std::getenv(config.lan_worker_secret_environment.c_str()) == nullptr) {
+            std::cerr << "HEXA_LAN_WORKER_SECRET is required for --lan-worker\n"; return 2;
+        }
+    }
     if (options->profile) app::apply_production_profile(config, *options->profile);
     app::AutoCompetitionClient client(api, std::move(config), clock,
         [] { return stop_requested != 0; }, std::cout, &logger);
