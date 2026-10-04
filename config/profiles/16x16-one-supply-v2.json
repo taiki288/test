@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "profileId": "16x16-one-supply-v1",
-  "profileVersion": 1,
+  "profileId": "16x16-one-supply-v2",
+  "profileVersion": 2,
   "status": "human-approved-provisional",
   "target": {
     "height": 16,
@@ -43,7 +43,7 @@
     "benchmarkMapsAllowed": false,
     "day1Plus": "offline-research-only"
   },
-  "plannerMode": "greedy-refuel",
+  "plannerMode": "daily-improvement",
   "selectorBudgetMs": 3000,
   "seed": 30013,
   "connectTimeoutMilliseconds": 2000,
@@ -126,5 +126,20 @@
       "fixedParameterHash": "41c9b1eb88be227a10238424df8800c590aa76373edd0d576841733620053974",
       "generatorVersion": 2
     }
-  ]
+  ],
+  "dailyDeadlinePolicy": {
+    "version": "daily-deadline-policy-v1",
+    "size": 16,
+    "baselineMaxMs": 1000,
+    "improvementMaxMs": 10000,
+    "reserveMs": 8000,
+    "minimumImprovementMs": 250,
+    "provisional": false
+  },
+  "dailyPolicyApproval": {
+    "authority": "phase-42-explicit-human-instruction",
+    "scope": "observed-current-day-only",
+    "baselineFirst": true,
+    "defaultChanged": false
+  }
 }

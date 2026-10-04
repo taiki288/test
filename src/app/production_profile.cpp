@@ -1,5 +1,8 @@
 #include "hexa_udon/app/production_profile.hpp"
 #include "hexa_udon/core/type_candidates.hpp"
+#include "hexa_udon/optimizer/daily_deadline_policy.hpp"
+#include <iomanip>
+#include <sstream>
 #include <algorithm>
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -68,6 +71,8 @@ bool validate_32_profile(const nlohmann::json& supplied) {
 }
 
 bool same_schema_types(const nlohmann::json& supplied, const nlohmann::json& approved) {
+    // Parsed positive integers may be unsigned; both remain integral JSON numbers.
+    if (supplied.is_number_integer() && approved.is_number_integer()) return true;
     if (supplied.type() != approved.type()) return false;
     if (approved.is_object()) {
         for (auto it = approved.begin(); it != approved.end(); ++it) {
@@ -214,11 +219,41 @@ constexpr const char* approved_profile = R"approved({
 }
 )approved";
 }
-void validate_production_profile(const std::filesystem::path& path) {
-    std::ifstream input(path);
-    if (!input || std::filesystem::file_size(path) > 65536)
-        throw std::runtime_error("profile missing or too large");
-    const auto supplied = nlohmann::json::parse(input);
+static std::string profile_digest(const nlohmann::json& value) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char byte : value.dump()) { hash ^= byte; hash *= 1099511628211ULL; }
+    std::ostringstream output;
+    output << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return output.str();
+}
+static void validate_profile_json(const nlohmann::json& supplied) {
+    if (supplied.value("profileVersion", 0) == 2) {
+        if (!supplied.at("profileVersion").is_number_integer())
+            throw std::runtime_error("profileVersion must be an integer");
+        const auto id = supplied.value("profileId", "");
+        const std::vector<std::string> ids{"16x16-one-supply-v2", "24x24-two-supply-v2", "32x32-one-or-three-supply-v2"};
+        const std::vector<std::string> digests{"bbebc8c4ad5379b5", "ff3664585e5c50e7", "7060bc11f88a2ed3"};
+        const auto found = std::find(ids.begin(), ids.end(), id);
+        if (found == ids.end()) throw std::runtime_error("unapproved v2 profile identity");
+        const auto index = static_cast<std::size_t>(found - ids.begin());
+        const auto policy = optimizer::DailyDeadlinePolicy::for_production_size(index == 0 ? 16 : index == 1 ? 24 : 32);
+        const nlohmann::json approval{{"authority","phase-42-explicit-human-instruction"},
+            {"scope","observed-current-day-only"},{"baselineFirst",true},{"defaultChanged",false}};
+        if (supplied.at("plannerMode") != "daily-improvement"
+            || supplied.at("dailyDeadlinePolicy") != policy->identity()
+            || !same_schema_types(supplied.at("dailyDeadlinePolicy"), policy->identity())
+            || supplied.at("dailyPolicyApproval") != approval
+            || !same_schema_types(supplied.at("dailyPolicyApproval"), approval))
+            throw std::runtime_error("unapproved daily deadline policy");
+        auto inherited = supplied;
+        inherited.erase("dailyDeadlinePolicy"); inherited.erase("dailyPolicyApproval");
+        inherited["profileId"] = id.substr(0, id.size()-1) + "1";
+        inherited["profileVersion"] = 1; inherited["plannerMode"] = "greedy-refuel";
+        if (profile_digest(inherited) != digests[index])
+            throw std::runtime_error("v2 inherited profile identity mismatch");
+        validate_profile_json(inherited);
+        return;
+    }
     if (supplied.value("profileId", "") == "32x32-one-or-three-supply-v1") {
         if (!validate_32_profile(supplied))
             throw std::runtime_error("profile schema/identity differs from human-approved 32x32-one-or-three-supply-v1");
@@ -283,12 +318,26 @@ void validate_production_profile(const std::filesystem::path& path) {
         != nlohmann::json{"type-policy-24-validation-01", "type-policy-24-holdout-01"})
         throw std::runtime_error("invalid 24x24 evidence exclusion mismatch");
 }
-void apply_production_profile(AutoClientConfig& config, const std::filesystem::path& path) {
-    validate_production_profile(path);
+void validate_production_profile(const std::filesystem::path& path) {
     std::ifstream input(path);
+    if (!input || std::filesystem::file_size(path) > 65536)
+        throw std::runtime_error("profile missing or too large");
+    validate_profile_json(nlohmann::json::parse(input));
+}
+void apply_production_profile(AutoClientConfig& config, const std::filesystem::path& path) {
+    std::ifstream input(path);
+    if (!input || std::filesystem::file_size(path) > 65536)
+        throw std::runtime_error("profile missing or too large");
     const auto profile = nlohmann::json::parse(input);
+    validate_profile_json(profile); // Apply exactly the bytes validated in this read.
     const auto& parameters = profile.at("parameters");
-    config.require_16x16_profile = profile.at("profileId") == "16x16-one-supply-v1";
+    config.require_16x16_profile = profile.at("target").at("height") == 16;
+    config.profile_version = profile.at("profileVersion").get<int>();
+    config.production_policy_identity = nullptr;
+    config.daily_deadline_policy = config.profile_version == 2;
+    if (config.daily_deadline_policy)
+        config.production_policy_identity = {{"profileId",profile.at("profileId")},
+            {"profileDigest",profile_digest(profile)}, {"policy",profile.at("dailyDeadlinePolicy")}};
     config.require_profile_target = true;
     config.profile_id = profile.at("profileId").get<std::string>();
     config.required_map_height = profile.at("target").at("height").get<std::size_t>();
@@ -300,7 +349,7 @@ void apply_production_profile(AutoClientConfig& config, const std::filesystem::p
     config.type_selector_allowed_supply_counts = profile.value("allowedSupplyCounts", std::vector<std::size_t>{});
     config.type_selector_budget = std::chrono::milliseconds{profile.at("selectorBudgetMs").get<int>()};
     config.type_selector_max_candidates = profile.value("typeCandidateCount", config.required_agent_count);
-    config.planner_mode = PlannerMode::GreedyRefuel;
+    config.planner_mode = config.daily_deadline_policy ? PlannerMode::DailyImprovement : PlannerMode::GreedyRefuel;
     config.planner_seed = profile.at("seed").get<std::uint64_t>();
     config.planner_budget = std::chrono::milliseconds{parameters.at("greedyBudgetMs").get<int>()};
     config.planner_candidate_limit = parameters.at("greedyCandidates").get<std::size_t>();

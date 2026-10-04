@@ -4,6 +4,7 @@
 #include "hexa_udon/planner/greedy_planner.hpp"
 #include "hexa_udon/session/polling.hpp"
 #include "hexa_udon/session/session.hpp"
+#include "hexa_udon/optimizer/daily_deadline_policy.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -30,6 +31,7 @@ struct AutoClientConfig {
     std::chrono::seconds safety_margin{5};
     std::size_t maximum_get_attempts = 8;
     PlannerMode planner_mode = PlannerMode::Wait;
+    bool daily_deadline_policy = false;
     std::chrono::milliseconds planner_budget{1500};
     std::size_t planner_candidate_limit = 2000;
     std::uint64_t planner_seed = 30013;
@@ -51,6 +53,8 @@ struct AutoClientConfig {
     bool require_16x16_profile = false;
     bool require_profile_target = false;
     std::string profile_id;
+    int profile_version = 1;
+    nlohmann::json production_policy_identity = nullptr;
     std::size_t required_map_height = 0;
     std::size_t required_map_width = 0;
     std::size_t required_agent_count = 0;
@@ -101,7 +105,8 @@ public:
     AutoCompetitionClient(protocol::ProconApiClient& api, AutoClientConfig config,
                           AppClock& clock, std::function<bool()> stop_requested,
                           std::ostream& output,
-                          protocol::OperationLogger* logger = nullptr);
+                          protocol::OperationLogger* logger = nullptr,
+                          const optimizer::DailyDeadlineStages* deadline_stages = nullptr);
 
     [[nodiscard]] RunResult run();
 
@@ -124,6 +129,7 @@ private:
     std::ostream& output_;
     protocol::NullOperationLogger null_logger_;
     protocol::OperationLogger* logger_;
+    const optimizer::DailyDeadlineStages* deadline_stages_;
 };
 
 }  // namespace hexa_udon::app

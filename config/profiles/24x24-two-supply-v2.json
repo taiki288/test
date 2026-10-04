@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "profileId": "24x24-two-supply-v1",
-  "profileVersion": 1,
+  "profileId": "24x24-two-supply-v2",
+  "profileVersion": 2,
   "status": "human-approved-provisional",
   "target": {
     "height": 24,
@@ -13,16 +13,76 @@
   "maxSupply": 2,
   "typeCandidateCount": 10,
   "typeCandidates": [
-    [0, 0, 0, 1, 1],
-    [0, 0, 1, 0, 1],
-    [0, 0, 1, 1, 0],
-    [0, 1, 0, 0, 1],
-    [0, 1, 0, 1, 0],
-    [0, 1, 1, 0, 0],
-    [1, 0, 0, 0, 1],
-    [1, 0, 0, 1, 0],
-    [1, 0, 1, 0, 0],
-    [1, 1, 0, 0, 0]
+    [
+      0,
+      0,
+      0,
+      1,
+      1
+    ],
+    [
+      0,
+      0,
+      1,
+      0,
+      1
+    ],
+    [
+      0,
+      0,
+      1,
+      1,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      0,
+      1
+    ],
+    [
+      0,
+      1,
+      0,
+      1,
+      0
+    ],
+    [
+      0,
+      1,
+      1,
+      0,
+      0
+    ],
+    [
+      1,
+      0,
+      0,
+      0,
+      1
+    ],
+    [
+      1,
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      1,
+      0,
+      1,
+      0,
+      0
+    ],
+    [
+      1,
+      1,
+      0,
+      0,
+      0
+    ]
   ],
   "informationBoundary": {
     "selectorInput": "setting-derived-Day0-map-initial-position-fuel-all-roads-smooth",
@@ -31,7 +91,7 @@
     "day1Plus": "offline-research-only",
     "note": "Day0限定。Day1+ snapshotは研究専用であり本番Selectorには与えない。"
   },
-  "plannerMode": "greedy-refuel",
+  "plannerMode": "daily-improvement",
   "selectorBudgetMs": 3000,
   "typeSubmissionReserveMs": 5250,
   "seed": 30013,
@@ -73,7 +133,11 @@
     {
       "split": "pilot",
       "outputId": "type-policy-24-pilot-01",
-      "twoVsOneWDL": [3, 0, 0],
+      "twoVsOneWDL": [
+        3,
+        0,
+        0
+      ],
       "trialFailures": 0,
       "configHash": "34dc8d21e7a014abcae1d27ca8f2dd43d856a898537c58fec520cf2c622fe0cd",
       "catalogHash": "2f53f0998039a33485c9cb5e540f7dc99f12787af722f8210746fb56b922abbf",
@@ -86,7 +150,11 @@
     {
       "split": "training",
       "outputId": "type-policy-24-training-01",
-      "twoVsOneWDL": [26, 0, 2],
+      "twoVsOneWDL": [
+        26,
+        0,
+        2
+      ],
       "trialFailures": 0,
       "configHash": "1e8e3ab1950366ddb650d5dd0bd2035771d1e34787a37536a941d25b2259dfd5",
       "catalogHash": "f6909d3fc577a5640c43f0661207426c00bf949f3c8b93ddc11fba35cf4f7c32",
@@ -99,7 +167,11 @@
     {
       "split": "validation",
       "outputId": "type-policy-24-validation-02",
-      "twoVsOneWDL": [26, 1, 1],
+      "twoVsOneWDL": [
+        26,
+        1,
+        1
+      ],
       "trialFailures": 0,
       "configHash": "72282861cf0604c62df7b2e9a0c522afb74cc7088ac3d10cd57bb52044c6da38",
       "catalogHash": "fa862ba825ca98aa1435e8f8946b81ea5dceb810775655c035a82d86be5be6c0",
@@ -112,7 +184,11 @@
     {
       "split": "holdout",
       "outputId": "type-policy-24-holdout-02",
-      "twoVsOneWDL": [26, 0, 2],
+      "twoVsOneWDL": [
+        26,
+        0,
+        2
+      ],
       "trialFailures": 0,
       "configHash": "60d49f5eae9945242b1e13deb55735c1a7a7e6b0549d745c90b2ac4d44140fb1",
       "catalogHash": "40e69446d08dc834f11299c15e89ae5cc286eb6d38625e36f3a3f09357fa22d3",
@@ -122,5 +198,20 @@
       "policyVersion": 1,
       "generatorVersion": 2
     }
-  ]
+  ],
+  "dailyDeadlinePolicy": {
+    "version": "daily-deadline-policy-v1",
+    "size": 24,
+    "baselineMaxMs": 2000,
+    "improvementMaxMs": 20000,
+    "reserveMs": 8000,
+    "minimumImprovementMs": 250,
+    "provisional": false
+  },
+  "dailyPolicyApproval": {
+    "authority": "phase-42-explicit-human-instruction",
+    "scope": "observed-current-day-only",
+    "baselineFirst": true,
+    "defaultChanged": false
+  }
 }

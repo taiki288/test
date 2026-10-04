@@ -1,39 +1,55 @@
 {
-  "manifestVersion": 1,
+  "manifestVersion": 2,
   "kind": "hexa-udon-production",
-  "source": "allowlist",
+  "source": "explicit-file-allowlist",
+  "sourceCommit": "3b6910f378f8a06979c3686fa07b026d712b536a",
+  "sourceCommitNote": "commit identifies history only; file hashes describe the actual working tree",
+  "allowlistSha256": "a6aac761a8ffda4d466eb27eeb2a9170b4449ef1c0c89a7908ddcca7e312e36b",
+  "profiles": [
+    "16x16-one-supply-v2.json",
+    "24x24-two-supply-v2.json",
+    "32x32-one-or-three-supply-v2.json"
+  ],
   "files": [
     {
       "path": "CMakeLists.txt",
-      "sha256": "d5417e20b6c5375c163b2d96ba9b31b46702b5f4514f72bb0c7b18b42b521ede"
+      "sha256": "5a362ae86042edd532c0cd3227d34645d957db5ee5b3d0ac6279610fbc5247d7"
     },
     {
       "path": "README.md",
-      "sha256": "b30e3ccb40839cc027fca8f5eac6337621cab93d0cbd042e80e3e766b4cf9866"
+      "sha256": "1bc3a7238320348585b69061f3aca6d3ae6e79efd7af7bc878dc446400d34b1d"
     },
     {
       "path": "cmake/CompilerWarnings.cmake",
       "sha256": "5893a07a15d096d3fa1d721d95d8c99182ec006028a7ceec6851069fd326c667"
     },
     {
-      "path": "config/profiles/16x16-one-supply-v1.json",
-      "sha256": "8ac205f4b6c8991036144f46d8dfabc227c34550e05e9c9437855994c83585aa"
+      "path": "config/profiles/16x16-one-supply-v2.json",
+      "sha256": "bb0462dc33c69110c3fcd8cfb5a6df37485d65474fb9cb5f1846a946d77cd777"
     },
     {
-      "path": "config/profiles/24x24-two-supply-v1.json",
-      "sha256": "bfbd769f45fb8d443ba6b0c6372c4ac36bfc96aceacccae3ea6bc3ac2becc292"
+      "path": "config/profiles/24x24-two-supply-v2.json",
+      "sha256": "081e1c2eb6356f86b6882c4615da214e438f28a3b5d6a919687b8b4c3a65d85b"
     },
     {
-      "path": "config/profiles/32x32-one-or-three-supply-v1.json",
-      "sha256": "555ba90e99920a664b3c3e94cf9d3fb8de8b3f71e8fb1ddcdb442ad1167b90e7"
+      "path": "config/profiles/32x32-one-or-three-supply-v2.json",
+      "sha256": "c5fc1bd6f6ac3080cc562c8ad8da021eb981665b61c7f1cd5bef7e49f1fb4b2b"
     },
     {
       "path": "docs/operations.md",
-      "sha256": "6ef7df3cbfa96841b34ec901a20ee88b451df469a77247a66b5fbcde821149ac"
+      "sha256": "9118454e9b997c43cdf563b78bdb75156e7ae6d1814636e23776a83f9d758899"
+    },
+    {
+      "path": "docs/recovery.md",
+      "sha256": "6dc898c73809052a14ad61294b6a57158e5e71c8081a000591e5a48f0d1481ce"
+    },
+    {
+      "path": "docs/safety.md",
+      "sha256": "2d263a03bf5f2d7bb4307771bed2dfe9d83217ce0e7733cb6bb83d7ee2168e88"
     },
     {
       "path": "include/hexa_udon/app/auto_client.hpp",
-      "sha256": "04ab6ff169ebac438f0323f3a1f1c5d5990b4ab4735446ecaaa0cab0c0fd4f5c"
+      "sha256": "d88fd1a29e9ff1058e6a17da15a263a2753796f9517df69221e4da9818a83ba4"
     },
     {
       "path": "include/hexa_udon/app/production_profile.hpp",
@@ -58,6 +74,10 @@
     {
       "path": "include/hexa_udon/core/types.hpp",
       "sha256": "dfe149f5bb7c5e1b3af727402b4293e6c1bdeb39899be37353ec70d1777b125c"
+    },
+    {
+      "path": "include/hexa_udon/optimizer/daily_deadline_policy.hpp",
+      "sha256": "9e7dff2ea56e6f01a636e887bdb914c2b91ace3e26cb7326082ad20340be716d"
     },
     {
       "path": "include/hexa_udon/optimizer/optimizer.hpp",
@@ -113,7 +133,7 @@
     },
     {
       "path": "include/hexa_udon/session/session.hpp",
-      "sha256": "eed045718c47c28bbc658b991a4ee8f1636546839ecaaf6cfa0c7e3771ae22e6"
+      "sha256": "3f72aa64a0e28a12aaa4a288a8b2ba8dfe477460164a3a73e9d7dfedad274a6a"
     },
     {
       "path": "include/hexa_udon/simulator/action.hpp",
@@ -125,15 +145,15 @@
     },
     {
       "path": "src/app/auto_client.cpp",
-      "sha256": "c329b559b02e529f35b9d4883c4e1e69c26efe4c5887f0dacff0dd50fe1ccf2e"
+      "sha256": "a1d598044ec8d51378d01dedc14fea77eea6b8637bf0f40d3e37559b3d4e85e6"
     },
     {
       "path": "src/app/main.cpp",
-      "sha256": "8b98c3321ed5c870781033868506aaad0a0209a6d2ba9e1a2287c25d98e18758"
+      "sha256": "4ccb342dfcd703d6d04d25caaaf1adb5f05dd419bd0754dba58de18eddf5cfa7"
     },
     {
       "path": "src/app/production_profile.cpp",
-      "sha256": "bb083c73d371dd302961f9c06c359043f0936b218befc25395bd7d3c9fac8f4a"
+      "sha256": "2d6bbeb188c67b8eda440f4bb632aa559f651465b0ed7dbabb010bbe6e914d2b"
     },
     {
       "path": "src/app/session_lock.cpp",
@@ -154,6 +174,10 @@
     {
       "path": "src/core/types.cpp",
       "sha256": "a19dda091f3a9e61a3293ea378404291bd5b7b3e6672d279e96739cc10f88ac3"
+    },
+    {
+      "path": "src/optimizer/daily_deadline_policy.cpp",
+      "sha256": "688e21773fedc402e0ca0e93f67ebd60da992f7a33895ef843ebfc715cc1cfc1"
     },
     {
       "path": "src/optimizer/optimizer.cpp",
@@ -205,7 +229,7 @@
     },
     {
       "path": "src/session/session.cpp",
-      "sha256": "9e8403e56862804c1064337b9fa89b0e8bf19aa2059b32f9ffeaadf8a0432adb"
+      "sha256": "cd87b33125736beb0a82a130fc2c2993d37b64195343dacc6daee9990761728e"
     },
     {
       "path": "src/simulator/action.cpp",

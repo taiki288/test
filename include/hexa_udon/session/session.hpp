@@ -5,6 +5,7 @@
 #include "hexa_udon/simulator/simulator.hpp"
 
 #include <chrono>
+#include <nlohmann/json.hpp>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -141,6 +142,8 @@ struct SessionSnapshot {
     std::optional<std::vector<core::AgentKind>> submitted_agent_kinds;
     std::optional<TypeSelectionMetadata> type_selection;
     bool agent_kinds_unknown = false;
+    std::vector<nlohmann::json> daily_planning_diagnostics;
+    nlohmann::json production_policy_identity = nullptr;
 };
 
 struct Deadline {
@@ -166,6 +169,9 @@ public:
         const std::vector<core::AgentKind>& kinds,
         std::optional<protocol::SteadyTime> deadline = std::nullopt);
     void record_type_selection(TypeSelectionMetadata metadata);
+    void record_daily_planning(nlohmann::json diagnostic);
+    // Reject changing an established production profile/policy during recovery.
+    [[nodiscard]] bool bind_production_policy(const nlohmann::json& identity);
     [[nodiscard]] protocol::Result<bool> verify_agent_kinds() const;
     [[nodiscard]] protocol::Result<simulator::DayActionPlan> make_safe_wait_plan() const;
     [[nodiscard]] protocol::Result<SubmissionRecord> submit_safe_wait(

@@ -312,6 +312,19 @@ protocol::Result<bool> SessionController::submit_agent_kinds(
     return protocol::Result<bool>::success(true);
 }
 
+void SessionController::record_daily_planning(nlohmann::json diagnostic) {
+    snapshot_.daily_planning_diagnostics.push_back(std::move(diagnostic));
+}
+bool SessionController::bind_production_policy(const nlohmann::json& identity) {
+    if (!snapshot_.production_policy_identity.is_null())
+        return snapshot_.production_policy_identity == identity;
+    if (identity.is_null()) return true;
+    if (snapshot_.submitted_agent_kinds || snapshot_.last_observed_day || !snapshot_.submissions.empty())
+        return false; // Legacy sessions cannot be silently promoted to v2.
+    snapshot_.production_policy_identity = identity;
+    return true;
+}
+
 void SessionController::record_type_selection(TypeSelectionMetadata metadata) {
     snapshot_.type_selection = std::move(metadata);
 }
@@ -482,6 +495,9 @@ protocol::Result<bool> SessionController::save(const std::filesystem::path& path
     } else {
         root["lastObservedDay"] = nullptr;
     }
+    root["dailyPlanningDiagnostics"] = snapshot_.daily_planning_diagnostics;
+    if (!snapshot_.production_policy_identity.is_null())
+        root["productionPolicyIdentity"] = snapshot_.production_policy_identity;
     root["acceptedDays"] = Json::array();
     root["submittedAgentKinds"] = Json::array();
     root["agentKindsUnknown"] = snapshot_.agent_kinds_unknown;
@@ -573,6 +589,10 @@ protocol::Result<bool> SessionController::restore(const std::filesystem::path& p
         }
 
         SessionSnapshot loaded;
+        loaded.daily_planning_diagnostics = root.value("dailyPlanningDiagnostics", std::vector<Json>{});
+        loaded.production_policy_identity = root.value("productionPolicyIdentity", Json(nullptr));
+        if (!loaded.production_policy_identity.is_null() && !loaded.production_policy_identity.is_object())
+            return protocol::Result<bool>::failure({protocol::ErrorCode::Persistence, "invalid production policy identity"});
         loaded.match_id = root.at("matchId").get<std::string>();
         if (!root.at("lastObservedDay").is_null()) {
             loaded.last_observed_day = root.at("lastObservedDay").get<core::Quantity>();

@@ -29,6 +29,7 @@ struct Options {
     std::optional<std::string> types;
     std::optional<std::filesystem::path> profile;
     bool profile_override = false;
+    bool daily_deadline_policy = false;
     bool execute = false;
     std::int64_t poll_ms = 750;
     std::int64_t connect_timeout_ms = 2000;
@@ -56,17 +57,19 @@ void usage() {
     std::cerr << "Usage:\n"
               << "  hexa_udon check --base-url URL [options]\n"
               << "  hexa_udon auto --base-url URL [--execute] [--types 0,0,0,1] [options]\n"
-              << "  hexa_udon recover --base-url URL --execute [options]\n"
+              << "  hexa_udon recover --base-url URL [options] (dry-run by default)\n"
               << "  hexa_udon show-state --session-dir DIR\n"
+              << "  hexa_udon validate-profile --profile FILE (offline; no token or HTTP)\n"
               << "Options: --token-env NAME --session-dir DIR --log-dir DIR --poll-ms N\n"
               << "         --connect-timeout-ms N --total-timeout-ms N --safety-seconds N\n"
               << "         --max-get-retries N --log-level info|warning|error\n";
     std::cerr << "         --planner wait|greedy|greedy-refuel|optimized|daily-improvement --planner-ms N --planner-candidates N --seed N\n"
               << "         --refuel-ms N --refuel-candidates N --rendezvous-candidates N --max-refuels N\n";
+    std::cerr << "         --daily-deadline-policy (manual daily-improvement opt-in; v2 profiles select their approved policy)\n";
     std::cerr << "         --optimizer-ms N --optimizer-iterations N\n";
     std::cerr << "         --type-selector fixed|prematch --type-selector-ms N --type-selector-max-supply 0|1|2\n";
     std::cerr << "         --type-selector-min-supply 0|1|2 (default 0; must not exceed max)\n";
-    std::cerr << "         --profile FILE (approved size-specific policy; auto only; no tuning overrides)\n";
+    std::cerr << "         --profile FILE (approved v1/v2 policy; auto/recover; no tuning overrides; 32x32 profile uses [1,3])\n";
 }
 
 template <typename T>
@@ -93,7 +96,8 @@ std::optional<Options> parse_options(int argc, char** argv) {
             || value == "--connect-timeout-ms" || value == "--total-timeout-ms")
             options.profile_override = true;
         auto next = [&]() -> const char* { return ++index < argc ? argv[index] : nullptr; };
-        if (value == "--execute") options.execute = true;
+        if (value == "--daily-deadline-policy") options.daily_deadline_policy = true;
+        else if (value == "--execute") options.execute = true;
         else if (value == "--base-url") { const auto* item = next(); if (!item) return {}; options.base_url = item; }
         else if (value == "--token-env") { const auto* item = next(); if (!item) return {}; options.token_environment = item; }
         else if (value == "--session-dir") { const auto* item = next(); if (!item) return {}; options.session_directory = item; }
@@ -126,6 +130,8 @@ std::optional<Options> parse_options(int argc, char** argv) {
 }
 
 bool valid(const Options& options) {
+    if (options.command == "validate-profile") return options.profile.has_value() && !options.execute && !options.profile_override;
+    if (options.daily_deadline_policy && (options.command != "auto" || options.planner != "daily-improvement" || options.profile)) return false;
     if (options.command == "show-state") return !options.execute;
     if (options.command != "check" && options.command != "auto" && options.command != "recover") return false;
     if (options.base_url.empty() || options.token_environment.empty()) return false;
@@ -146,7 +152,6 @@ bool valid(const Options& options) {
         || options.rendezvous_candidates == 0 || options.max_refuels == 0) return false;
     if (options.optimizer_ms <= 0 || options.optimizer_iterations == 0) return false;
     if (options.command == "check" && options.execute) return false;
-    if (options.command == "recover" && !options.execute) return false;
     return true;
 }
 
@@ -200,12 +205,16 @@ int main(int argc, char** argv) {
     const auto options = parse_options(argc, argv);
     if (!options || !valid(*options)) { usage(); return 2; }
     if (options->profile) {
-        if (options->command != "auto" || options->profile_override) {
-            std::cerr << "Profile requires auto and forbids tuning overrides (explicit --types remains allowed)\n";
+        if ((options->command != "auto" && options->command != "recover" && options->command != "validate-profile") || options->profile_override) {
+            std::cerr << "Profile requires auto/recover and forbids tuning overrides (explicit --types remains allowed)\n";
             return 2;
         }
         try { app::validate_production_profile(*options->profile); }
         catch (const std::exception&) { std::cerr << "Invalid approved profile schema/identity\n"; return 2; }
+    }
+    if (options->command == "validate-profile") {
+        std::cout << "profile-schema=valid networkRequests=0 postCount=0\n";
+        return 0;
     }
     if (options->command == "show-state") return show_state(options->session_directory);
     const char* token = std::getenv(options->token_environment.c_str());
@@ -267,6 +276,7 @@ int main(int argc, char** argv) {
         : options->planner == "optimized" ? app::PlannerMode::Optimized
         : options->planner == "greedy-refuel" ? app::PlannerMode::GreedyRefuel
         : options->planner == "greedy" ? app::PlannerMode::Greedy : app::PlannerMode::Wait;
+    config.daily_deadline_policy = options->daily_deadline_policy;
     config.planner_budget = std::chrono::milliseconds{options->planner_ms};
     config.planner_candidate_limit = options->planner_candidates;
     config.planner_seed = options->planner_seed;

@@ -3,6 +3,7 @@
 #include "hexa_udon/planner/refuel_planner.hpp"
 #include "hexa_udon/planner/prematch_type_selector.hpp"
 #include "hexa_udon/optimizer/optimizer.hpp"
+#include "hexa_udon/optimizer/daily_deadline_policy.hpp"
 #include "hexa_udon/protocol/json_codec.hpp"
 
 #include <algorithm>
@@ -164,10 +165,10 @@ protocol::Result<std::vector<core::AgentKind>> parse_kind_list(const std::string
 AutoCompetitionClient::AutoCompetitionClient(
     protocol::ProconApiClient& api, AutoClientConfig config, AppClock& clock,
     std::function<bool()> stop_requested, std::ostream& output,
-    protocol::OperationLogger* logger)
+    protocol::OperationLogger* logger, const optimizer::DailyDeadlineStages* deadline_stages)
     : api_(api), config_(std::move(config)), clock_(clock),
       stop_requested_(std::move(stop_requested)), output_(output),
-      logger_(logger == nullptr ? &null_logger_ : logger) {}
+      logger_(logger == nullptr ? &null_logger_ : logger), deadline_stages_(deadline_stages) {}
 
 protocol::Result<core::MatchConfig> AutoCompetitionClient::fetch_setting() {
     auto backoff = std::chrono::milliseconds{500};
@@ -270,7 +271,7 @@ void AutoCompetitionClient::print_day_summary(
 
 RunResult AutoCompetitionClient::run() {
     output_ << "mode=" << (config_.mode == RunMode::Execute ? "EXECUTE" : "DRY-RUN")
-            << " baseUrl=" << config_.base_url << '\n';
+            << " transport=configured" << '\n';
     if (stop_requested_()) return {RunStatus::Stopped, "stop requested before startup"};
     std::error_code directory_error;
     std::filesystem::create_directories(config_.state_directory, directory_error);
@@ -315,7 +316,7 @@ RunResult AutoCompetitionClient::run() {
                        ? (config_.required_agent_count * (config_.required_agent_count - 1)) / 2 : 1)
                 : 0;
         }
-        output_ << "profile=" << config_.profile_id << " version=1 type-selector=prematch minSupply="
+        output_ << "profile=" << config_.profile_id << " version=" << config_.profile_version << " type-selector=prematch minSupply="
                 << config_.type_selector_min_supply << " maxSupply=" << config_.type_selector_max_supply
                 << " selectorCandidates=" << candidate_count
                 << " allowedSupplyCounts=";
@@ -325,7 +326,8 @@ RunResult AutoCompetitionClient::run() {
                    " selectorMs=" << config_.type_selector_budget.count()
                 << " greedyMs=" << config_.planner_budget.count()
                 << " refuelMs=" << config_.refuel_budget.count()
-                << " seed=" << config_.planner_seed << '\n';
+                << " seed=" << config_.planner_seed
+                << " dailyPlanner=" << (config_.daily_deadline_policy ? "daily-improvement" : "greedy-refuel") << '\n';
     }
     const auto state_path = config_.state_directory / "session.json";
     session::SessionController initial(api_, setting.value(), nullptr, logger_);
@@ -336,6 +338,8 @@ RunResult AutoCompetitionClient::run() {
             return {RunStatus::RecoveryRequired, "saved session contains an unknown POST outcome"};
         }
     }
+    if (!initial.bind_production_policy(config_.production_policy_identity))
+        return {RunStatus::RecoveryRequired, "production profile/policy identity mismatch; recover with the original profile"};
     std::vector<core::AgentKind> selected_kinds;
     std::optional<session::TypeSelectionMetadata> selection_metadata;
     bool selected_by_profile_selector = false;
@@ -567,7 +571,8 @@ RunResult AutoCompetitionClient::run() {
         output_ << "session=agent-types-dry-run body=";
         auto encoded = protocol::encode_agent_kinds(selected_kinds);
         output_ << (encoded ? encoded.value() : "<invalid>") << '\n';
-        if (config_.type_selector == TypeSelectorMode::Prematch)
+        if (config_.type_selector == TypeSelectorMode::Prematch
+            && !(config_.profile_version == 2 && initial.snapshot().submitted_agent_kinds))
             return {RunStatus::Completed, "prematch type-selector dry-run completed without POST"};
     }
 
@@ -589,9 +594,55 @@ RunResult AutoCompetitionClient::run() {
         auto restored = competition.restore(state_path);
         if (!restored) return {RunStatus::RecoveryRequired, restored.error().message};
     }
+    if (!competition.bind_production_policy(config_.production_policy_identity))
+        return {RunStatus::RecoveryRequired, "production profile/policy identity mismatch"};
     std::optional<core::Quantity> observed_day = competition.snapshot().last_observed_day;
     bool reconcile_server_state = observed_day.has_value();
     std::set<core::Quantity> dry_processed;
+    simulator::MatchProgress policy_dry_progress;
+    // Only locally Simulator-validated DryRun receipts may seed a dry-run recovery.
+    // They never become official accepted days or seed the execute path.
+    if (config_.mode == RunMode::DryRun && config_.daily_deadline_policy) {
+        std::map<core::Quantity, const session::SubmissionRecord*> summaries;
+        for (const auto& receipt : competition.snapshot().submissions) {
+            if (receipt.classification == session::SubmissionClassification::DryRun)
+                summaries[receipt.day] = &receipt;
+        }
+        for (const auto& [day, receipt] : summaries) {
+            if (day != static_cast<core::Quantity>(dry_processed.size()))
+                return {RunStatus::RecoveryRequired, "non-contiguous dry-run simulation history"};
+            const auto diagnostic = std::find_if(
+                competition.snapshot().daily_planning_diagnostics.rbegin(),
+                competition.snapshot().daily_planning_diagnostics.rend(), [&](const auto& r) {
+                    return r.is_object() && r.contains("day") && r["day"] == day
+                        && r.contains("termination") && r["termination"] == "completed";
+                });
+            if (diagnostic == competition.snapshot().daily_planning_diagnostics.rend()
+                || !receipt->planner || !diagnostic->contains("snapshotHash")
+                || !diagnostic->contains("startStateHash") || !diagnostic->contains("endStateHash")
+                || !diagnostic->contains("types") || !diagnostic->contains("dryRunEndAgentsHash")
+                || !diagnostic->contains("actionHash") || !diagnostic->contains("planHash"))
+                return {RunStatus::RecoveryRequired, "incomplete dry-run recovery identity"};
+            const auto actions = nlohmann::json::parse(receipt->action_json, nullptr, false);
+            const auto encoded_types = nlohmann::json(selected_kinds);
+            if (actions.is_discarded() || (*diagnostic)["types"] != encoded_types
+                || (*diagnostic)["snapshotHash"] != receipt->planner->snapshot_identity
+                || (*diagnostic)["startStateHash"] != receipt->planner->agent_state_identity
+                || (*diagnostic)["endStateHash"] != receipt->planner->next_state_identity
+                || (*diagnostic)["dryRunEndAgentsHash"] != agent_state_identity(
+                    core::DailyState{0, day, receipt->simulation.end_agents, {}, {}})
+                || (*diagnostic)["actionHash"] != stable_hash(actions.dump())
+                || (*diagnostic)["planHash"] != stable_hash(nlohmann::json{
+                    {"actions",actions},{"types",encoded_types},{"day",day}}.dump()))
+                return {RunStatus::RecoveryRequired, "dry-run action/state/snapshot identity mismatch"};
+            const auto& summary = receipt->simulation;
+            dry_processed.insert(day);
+            policy_dry_progress.acquired_brands.insert(summary.brands.begin(), summary.brands.end());
+            policy_dry_progress.total_balls += summary.total_balls;
+            policy_dry_progress.daily_distinct_brand_counts.push_back(
+                static_cast<core::Quantity>(summary.brands.size()));
+        }
+    }
     const auto total_days = static_cast<core::Quantity>(setting.value().day_steps.size());
     const auto log_daily_failure = [&](const core::Quantity day, const std::string& phase,
                                        const std::string& reason) {
@@ -673,6 +724,76 @@ RunResult AutoCompetitionClient::run() {
             ? competition.snapshot().accepted_days.contains(daily.value().day)
             : dry_processed.contains(daily.value().day);
         if (!already_done) {
+            if (config_.daily_deadline_policy) {
+                if (config_.planner_mode != PlannerMode::DailyImprovement)
+                    return {RunStatus::Failed, "daily deadline policy requires daily-improvement opt-in"};
+                const auto size = static_cast<std::size_t>(setting.value().map.height());
+                const auto policy = config_.profile_version == 2
+                    ? optimizer::DailyDeadlinePolicy::for_production_size(size)
+                    : optimizer::DailyDeadlinePolicy::for_size(size);
+                if (!policy) return {RunStatus::Failed, "unsupported daily deadline policy size"};
+                auto observed_deadline = optimizer::observed_daily_deadline(
+                    daily.value().ends_at, clock_.wall_now(), clock_.now());
+                const auto extra_reserve = std::max(std::chrono::milliseconds{0},
+                    std::chrono::duration_cast<std::chrono::milliseconds>(config_.safety_margin) - policy->reserve);
+                if (observed_deadline) *observed_deadline -= extra_reserve;
+                optimizer::OptimizerConfig improvement_config;
+                improvement_config.seed = config_.planner_seed;
+                improvement_config.maximum_iterations = config_.optimizer_iterations;
+                improvement_config.initial_temperature = config_.optimizer_initial_temperature;
+                improvement_config.final_temperature = config_.optimizer_final_temperature;
+                auto planned = optimizer::run_daily_deadline_policy(
+                    {setting.value(), daily.value(), config_.mode == RunMode::DryRun ? policy_dry_progress : competition.progress()}, *policy, observed_deadline,
+                    {config_.planner_candidate_limit, config_.planner_seed},
+                    {config_.refuel_candidate_limit, config_.rendezvous_candidate_limit,
+                     config_.maximum_refuels_per_patrol, config_.planner_seed},
+                    improvement_config, [&] { return clock_.now(); },
+                    deadline_stages_ ? *deadline_stages_ : optimizer::DailyDeadlineStages{});
+                planned.record["additionalSafetyReserveMs"] = extra_reserve.count();
+                planned.record["profileId"] = config_.profile_id;
+                planned.record["profileVersion"] = config_.profile_version;
+                planned.record["productionPolicyIdentity"] = config_.production_policy_identity;
+                planned.record["observedEndsAt"] = daily.value().ends_at;
+                if (config_.mode == RunMode::DryRun && planned.simulation)
+                    planned.record["dryRunEndAgentsHash"] = agent_state_identity(
+                        core::DailyState{0, daily.value().day, planned.simulation->end_agents, {}, {}});
+                planned.record["configuredBudgets"] = {{"greedyMs",config_.planner_budget.count()},
+                    {"refuelMs",config_.refuel_budget.count()}, {"optimizerMs",config_.optimizer_budget.count()}};
+                planned.record["effectiveDailyBudgets"] = {{"baselineMaxMs",policy->baseline_max.count()},
+                    {"improvementMaxMs",policy->improvement_max.count()}, {"reserveMs",policy->reserve.count()+extra_reserve.count()},
+                    {"stageContract","shared-baseline-monotonic-deadline"}};
+                competition.record_daily_planning(planned.record);
+                output_ << "daily-deadline " << planned.record.dump() << '\n';
+                protocol::OperationLogEntry entry;
+                entry.operation = "daily-deadline-policy"; entry.day = daily.value().day;
+                entry.result = planned.record.dump(); logger_->write(entry);
+                const auto saved = competition.save(state_path);
+                if (!saved) return {RunStatus::Failed, saved.error().message};
+                if (!planned.plan) return {RunStatus::RecoveryRequired,
+                    planned.record.at("failureReason").get<std::string>()};
+                std::optional<session::PlannerSubmissionMetadata> dry_metadata;
+                if (config_.mode == RunMode::DryRun) {
+                    dry_metadata.emplace();
+                    dry_metadata->planner_kind = "daily-improvement-dry-run";
+                    dry_metadata->snapshot_identity = planned.record.at("snapshotHash").get<std::string>();
+                    dry_metadata->agent_state_identity = planned.record.at("startStateHash").get<std::string>();
+                    dry_metadata->next_state_identity = planned.record.at("endStateHash").get<std::string>();
+                    dry_metadata->selection_reason = planned.record.at("adoptionReason").get<std::string>();
+                }
+                auto sent = competition.submit_plan(*planned.plan, config_.mode == RunMode::DryRun,
+                    *observed_deadline - policy->reserve, dry_metadata);
+                if (!sent) return {RunStatus::RecoveryRequired, sent.error().message};
+                if (config_.mode == RunMode::DryRun) {
+                    dry_processed.insert(daily.value().day);
+                    policy_dry_progress = simulator::accumulate_progress(policy_dry_progress, *planned.simulation);
+                    const auto saved_dry = competition.save(state_path);
+                    if (!saved_dry) return {RunStatus::Failed, saved_dry.error().message};
+                } else {
+                    const auto saved_submission = competition.save(state_path);
+                    if (!saved_submission) return {RunStatus::Failed, saved_submission.error().message};
+                }
+                print_day_summary(setting.value(), daily.value(), sent.value(), competition.progress());
+            } else {
             const auto deadline = competition.deadline(clock_.wall_now(), clock_.now(), config_.safety_margin);
             if (deadline.remaining(clock_.now()).count() <= 0) {
                 log_daily_failure(daily.value().day, "deadline_exhausted", "safety deadline");
@@ -1046,6 +1167,8 @@ RunResult AutoCompetitionClient::run() {
                 }
             }
         }
+
+        } // Legacy planning path remains unchanged without policy opt-in.
 
         if (daily.value().day == total_days - 1) {
             const auto end = unix_time(daily.value().ends_at);
