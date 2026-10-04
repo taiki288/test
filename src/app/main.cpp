@@ -56,7 +56,7 @@ struct Options {
     std::optional<std::string> worker_listen;
     std::string worker_token_environment;
     std::vector<std::string> lan_worker_values;
-    std::int64_t lan_worker_timeout_ms = 250;
+    std::int64_t lan_worker_timeout_ms = 0;
 };
 
 void usage() {
@@ -154,7 +154,7 @@ bool valid(const Options& options) {
     if (!options.lan_worker_values.empty() && options.command != "auto") return false;
     if (!options.lan_worker_values.empty() && options.planner != "daily-improvement"
         && !options.profile && !options.profile_set) return false;
-    if (options.lan_worker_timeout_ms <= 0 || options.lan_worker_timeout_ms > 30000) return false;
+    if (options.lan_worker_timeout_ms < 0 || options.lan_worker_timeout_ms > 30000) return false;
     if (options.profile_set && (options.command != "auto" || *options.profile_set != "v2" || options.profile)) return false;
     if (options.command == "validate-profile") return options.profile.has_value() && !options.execute && !options.profile_override;
     if (options.daily_deadline_policy && (options.command != "auto" || options.planner != "daily-improvement" || options.profile)) return false;

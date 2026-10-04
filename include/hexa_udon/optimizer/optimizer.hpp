@@ -18,6 +18,7 @@ enum class Neighborhood : std::uint8_t {
     SwapWithin,
     RelocateWithin,
     AddSpot,
+    AddUncollectedBrand,
     RemoveSpot,
     ReplaceSameBrand,
     MoveBetweenPatrols,
@@ -87,6 +88,21 @@ struct NeighborhoodStatistics {
     std::size_t improved = 0;
 };
 
+struct CandidateDiagnostic {
+    std::string neighborhood_kind;
+    std::string fallback_reason;
+    std::int64_t acquired_brand_count = 0;
+    std::int64_t newly_acquired_brand_count = 0;
+    std::int64_t uncollected_brand_count = 0;
+    planner::OfficialScore official_score_delta;
+    planner::DailyReadiness daily_readiness_delta;
+    bool accepted = false;
+    std::string rejection_reason;
+    std::string candidate_hash;
+    std::string action_hash;
+    std::string plan_hash;
+};
+
 enum class OptimizerTermination { Completed, Deadline, IterationLimit, InvalidLimit, Fallback };
 enum class CoolingSchedule { Geometric, Linear };
 
@@ -123,6 +139,7 @@ struct OptimizerResult {
     std::size_t accepted_candidates = 0;
     std::size_t improvements = 0;
     std::array<NeighborhoodStatistics, static_cast<std::size_t>(Neighborhood::Count)> neighborhoods{};
+    std::vector<CandidateDiagnostic> candidate_diagnostics;
     OptimizerTermination termination = OptimizerTermination::Fallback;
     std::chrono::microseconds elapsed{0};
     std::string diagnostic;
@@ -168,7 +185,8 @@ using OptimizerClock = std::function<std::chrono::steady_clock::time_point()>;
 
 [[nodiscard]] bool apply_neighborhood(
     StructuredSolution& solution, Neighborhood neighborhood,
-    const planner::PlannerInput& input, std::mt19937_64& random);
+    const planner::PlannerInput& input, std::mt19937_64& random,
+    std::string* mutation_kind = nullptr);
 
 [[nodiscard]] OptimizerOutcome optimize(
     const planner::PlannerInput& input,

@@ -216,14 +216,22 @@ AutoCompetitionClient::AutoCompetitionClient(
       stop_requested_(std::move(stop_requested)), output_(output),
       logger_(logger == nullptr ? &null_logger_ : logger), deadline_stages_(deadline_stages) {}
 
-protocol::Result<core::MatchConfig> AutoCompetitionClient::fetch_setting() {
+protocol::Result<core::MatchConfig> AutoCompetitionClient::fetch_setting(
+    const std::string& phase, std::optional<protocol::SteadyTime> deadline) {
     auto backoff = std::chrono::milliseconds{500};
     std::size_t failures = 0;
     while (!stop_requested_()) {
-        auto result = api_.get_setting();
+        auto result = api_.get_setting(deadline, phase);
         if (result) return result;
         if (!retryable(result.error().code) || ++failures >= config_.maximum_get_attempts) return result;
-        clock_.wait_until(clock_.now() + backoff);
+        const auto wait_duration = result.error().retry_after_ms
+            ? std::chrono::milliseconds{*result.error().retry_after_ms} : backoff;
+        const auto target = clock_.now() + wait_duration;
+        if (deadline && target > *deadline) {
+            return protocol::Result<core::MatchConfig>::failure(
+                {protocol::ErrorCode::DeadlineExceeded, "setting retry exceeds deadline"});
+        }
+        clock_.wait_until(target);
         backoff = std::min(backoff * 2, std::chrono::milliseconds{4000});
     }
     return protocol::Result<core::MatchConfig>::failure(
@@ -236,7 +244,7 @@ protocol::Result<core::DailyState> AutoCompetitionClient::fetch_state(
     auto backoff = std::chrono::milliseconds{500};
     std::size_t failures = 0;
     while (!stop_requested_() && clock_.wall_now() < wall_deadline) {
-        auto result = api_.get_state(config);
+        auto result = api_.get_state(config, std::nullopt, "daily-state");
         if (result) {
             failures = 0;
             backoff = std::chrono::milliseconds{500};
@@ -245,7 +253,10 @@ protocol::Result<core::DailyState> AutoCompetitionClient::fetch_state(
                 return protocol::Result<core::DailyState>::failure(
                     {protocol::ErrorCode::Conflict, "server day moved backwards"});
             }
-            clock_.wait_until(clock_.now() + config_.polling_interval);
+            const auto target = clock_.now() + backoff;
+            if (clock_.wall_now() + backoff > wall_deadline) break;
+            clock_.wait_until(target);
+            backoff = std::min(backoff * 2, std::chrono::milliseconds{4000});
             continue;
         }
         if (result.error().code == protocol::ErrorCode::Auth || !retryable(result.error().code)) {
@@ -255,7 +266,11 @@ protocol::Result<core::DailyState> AutoCompetitionClient::fetch_state(
             ++failures >= config_.maximum_get_attempts) {
             return result;
         }
-        clock_.wait_until(clock_.now() + backoff);
+        const auto wait_duration = result.error().retry_after_ms
+            ? std::chrono::milliseconds{*result.error().retry_after_ms} : backoff;
+        const auto target = clock_.now() + wait_duration;
+        if (clock_.wall_now() + wait_duration > wall_deadline) break;
+        clock_.wait_until(target);
         backoff = std::min(backoff * 2, std::chrono::milliseconds{4000});
     }
     return protocol::Result<core::DailyState>::failure(
@@ -286,7 +301,7 @@ void AutoCompetitionClient::print_day_summary(
     output_ << "day=" << daily.day << '/' << config.day_steps.size() - 1
             << " endsAt=" << daily.ends_at << " remainingSeconds=" << std::max<std::int64_t>(0, remaining)
             << " safetyMarginSeconds=" << config_.safety_margin.count() << '\n'
-            << "actions=" << record.action_json << " localId=" << record.local_id;
+            << "actions=omitted localId=" << record.local_id;
     if (record.revision) output_ << " revision=" << *record.revision;
     output_ << " predictedBrands=" << record.simulation.brands.size()
             << " predictedBalls=" << record.simulation.total_balls
@@ -330,7 +345,7 @@ RunResult AutoCompetitionClient::run() {
         lock = acquired.take();
     }
 
-    auto setting = fetch_setting();
+    auto setting = fetch_setting("registration");
     if (!setting) return {stop_requested_() ? RunStatus::Stopped : RunStatus::Failed,
                           setting.error().message};
     output_ << "session=setting-received startsAt=" << setting.value().starts_at << '\n';
@@ -656,7 +671,7 @@ RunResult AutoCompetitionClient::run() {
         if (!submitted) {
             const auto saved_failure = initial.save(state_path);
             if (!saved_failure) return {RunStatus::Failed, saved_failure.error().message};
-            return {submitted.error().code == protocol::ErrorCode::UnknownResponse
+            return {submitted.error().submission_attempted != std::optional<bool>{false}
                         ? RunStatus::RecoveryRequired : RunStatus::Failed,
                     submitted.error().message};
         }
@@ -664,25 +679,15 @@ RunResult AutoCompetitionClient::run() {
         if (!saved) return {RunStatus::Failed, saved.error().message};
         output_ << "session=agent-types-submitted\n";
     } else if (config_.mode == RunMode::DryRun) {
-        output_ << "session=agent-types-dry-run body=";
-        auto encoded = protocol::encode_agent_kinds(selected_kinds);
-        output_ << (encoded ? encoded.value() : "<invalid>") << '\n';
+        output_ << "session=agent-types-dry-run body=omitted\n";
         if (config_.type_selector == TypeSelectorMode::Prematch
             && !(config_.profile_version == 2 && initial.snapshot().submitted_agent_kinds))
             return {RunStatus::Completed, "prematch type-selector dry-run completed without POST"};
     }
 
-    if (setting.value().starts_at == 0) {
-        const auto start_deadline = clock_.now() + std::chrono::minutes{10};
-        while (setting.value().starts_at == 0 && !stop_requested_() && clock_.now() < start_deadline) {
-            clock_.wait_until(clock_.now() + config_.polling_interval);
-            auto refreshed = fetch_setting();
-            if (!refreshed) return {RunStatus::Failed, refreshed.error().message};
-            setting = std::move(refreshed);
-        }
-        if (stop_requested_()) return {RunStatus::Stopped, "stop requested"};
-        if (setting.value().starts_at == 0) return {RunStatus::Failed, "match start was not fixed before timeout"};
-    }
+    // Once type registration is complete, wait for the first daily state on GET /
+    // instead of re-fetching the already accepted match setting. fetch_state()
+    // owns the 403/Retry-After/backoff/deadline policy for this phase.
     output_ << "session=waiting-for-match startsAt=" << setting.value().starts_at << '\n';
 
     session::SessionController competition(api_, setting.value(), nullptr, logger_);
@@ -756,6 +761,11 @@ RunResult AutoCompetitionClient::run() {
         entry.day = day;
         entry.result = "termination=" + phase + ";failureReason=" + safe_reason;
         entry.state_transition = "safe-stop-no-plan-post";
+        entry.endpoint = "/";
+        entry.phase = "daily-submit";
+        entry.stop_reason = phase + ":" + safe_reason;
+        entry.response_classification = "safe-stop";
+        entry.submission_attempted = false;
         logger_->write(entry);
     };
 
@@ -830,26 +840,135 @@ RunResult AutoCompetitionClient::run() {
                 if (!policy) return {RunStatus::Failed, "unsupported daily deadline policy size"};
                 auto observed_deadline = optimizer::observed_daily_deadline(
                     daily.value().ends_at, clock_.wall_now(), clock_.now());
+                constexpr auto planning_safety_reserve = std::chrono::seconds{10};
                 const auto extra_reserve = std::max(std::chrono::milliseconds{0},
-                    std::chrono::duration_cast<std::chrono::milliseconds>(config_.safety_margin) - policy->reserve);
-                if (observed_deadline) *observed_deadline -= extra_reserve;
+                    std::chrono::duration_cast<std::chrono::milliseconds>(planning_safety_reserve) - policy->reserve);
+                if (observed_deadline) *observed_deadline -= planning_safety_reserve;
                 optimizer::OptimizerConfig improvement_config;
                 improvement_config.seed = config_.planner_seed;
                 improvement_config.maximum_iterations = config_.optimizer_iterations;
                 improvement_config.initial_temperature = config_.optimizer_initial_temperature;
                 improvement_config.final_temperature = config_.optimizer_final_temperature;
+                auto daily_stages = deadline_stages_ ? *deadline_stages_ : optimizer::DailyDeadlineStages{};
+                if (!config_.lan_workers.empty()) {
+                    daily_stages.worker = [&](const planner::PlannerInput& worker_input,
+                        const planner::PlannerResult&, const planner::RefuelPlannerResult& baseline_refuel,
+                        const simulator::DaySimulationResult& baseline_sim,
+                        protocol::SteadyTime hard_deadline, std::chrono::milliseconds effective_timeout,
+                        optimizer::OptimizerClock worker_now) {
+                        static_cast<void>(worker_input);
+                        optimizer::DailyDeadlineStages::WorkerResult result;
+                        result.reason = "worker-unavailable";
+                        const auto started = worker_now();
+                        const auto previous = config_.mode == RunMode::DryRun ? policy_dry_progress : competition.progress();
+                        const auto baseline_score = planner::official_score(previous, baseline_sim);
+                        nlohmann::json request = {
+                            {"requestId", daily_snapshot_identity(setting.value(), daily.value())},
+                            {"evaluatorVersion", "daily-improvement-candidate-v1"},
+                            {"day", daily.value().day}, {"size", setting.value().map.height()},
+                            {"agentCount", daily.value().own_agents.size()},
+                            {"typeIdentity", type_identity(selected_kinds)},
+                            {"snapshotIdentity", daily_snapshot_identity(setting.value(), daily.value())},
+                            {"mapIdentity", daily_snapshot_identity(setting.value(), daily.value())},
+                            {"stateIdentity", agent_state_identity(daily.value())},
+                            {"policyIdentity", config_.production_policy_identity},
+                            {"workerBudgetMs", effective_timeout.count()},
+                            {"futureSnapshotRead", false}, {"lookahead", 0}};
+                        request["plannerInput"] = canonical_planner_input(
+                            setting.value(), daily.value(), previous, selected_kinds,
+                            config_.planner_seed, effective_timeout.count());
+                        request["payloadHash"] = canonical_json_hash(request["plannerInput"]);
+                        const char* secret = std::getenv(config_.lan_worker_secret_environment.c_str());
+                        if (secret == nullptr || *secret == '\0') return result;
+                        for (const auto& endpoint : config_.lan_workers) {
+                            if (worker_now() + effective_timeout > hard_deadline) {
+                                result.reason = "worker-timeout"; break;
+                            }
+                            const auto endpoint_digest = stable_hash(endpoint.host + ":" + std::to_string(endpoint.port));
+                            const auto reply = request_lan_worker(endpoint, secret, request, effective_timeout);
+                            if (!reply.success) { result.reason = reply.error.empty() ? "worker-failure" : reply.error; continue; }
+                            try {
+                                simulator::RawDayActionPlan raw;
+                                for (const auto& row : reply.payload.at("actions")) raw.push_back(row.get<std::vector<std::int32_t>>());
+                                const auto parsed = simulator::parse_action_plan(raw);
+                                if (!parsed) { result.reason = "candidate-action-invalid"; continue; }
+                                const simulator::DaySimulationInput sim_input{
+                                    setting.value().map, setting.value().spots, setting.value().fuel_limit,
+                                    setting.value().day_steps.at(static_cast<std::size_t>(daily.value().day)),
+                                    daily.value().own_agents, daily.value().traffic};
+                                const auto simulation = simulator::simulate_day(sim_input, parsed.value());
+                                if (!simulation) { result.reason = "candidate-simulator-rejected"; continue; }
+                                std::vector<std::vector<std::size_t>> visited(simulation.value().acquisitions.size());
+                                for (std::size_t i = 0; i < visited.size(); ++i) visited[i] = simulation.value().acquisitions[i].spot_indices;
+                                const auto candidate_score = planner::official_score(previous, simulation.value());
+                                const auto candidate_readiness = planner::daily_readiness(setting.value(), daily.value(), simulation.value(), visited);
+                                const auto expected_score = nlohmann::json::array({candidate_score.total_unique_brands, candidate_score.cumulative_daily_unique_brands, candidate_score.total_bowls});
+                                const auto expected_readiness = nlohmann::json::array({candidate_readiness.uncollected_spot_reachability, candidate_readiness.fuel_reserve, candidate_readiness.patrol_dispersion, candidate_readiness.rendezvous_readiness});
+                                const auto actions = reply.payload.at("actions");
+                                const auto action_hash = canonical_json_hash(actions);
+                                const auto plan_hash = canonical_json_hash({{"actions", actions}, {"types", selected_kinds}});
+                                nlohmann::json end_agents = nlohmann::json::array();
+                                for (const auto& agent : simulation.value().end_agents) end_agents.push_back({{"kind", core::to_int(agent.kind)}, {"position", agent.position.value}, {"fuel", agent.fuel}});
+                                const auto end_hash = canonical_json_hash(end_agents);
+                                nlohmann::json start_agents = nlohmann::json::array();
+                                for (const auto& agent : daily.value().own_agents) start_agents.push_back({{"kind", core::to_int(agent.kind)}, {"position", agent.position.value}, {"fuel", agent.fuel}});
+                                const auto start_hash = canonical_json_hash(start_agents);
+                                nlohmann::json mismatches = nlohmann::json::array();
+                                const auto compare = [&](const std::string& field, const nlohmann::json& expected, const nlohmann::json& actual) {
+                                    if (expected != actual) mismatches.push_back({{"field", field}, {"expectedDigest", canonical_json_hash(expected)}, {"actualDigest", canonical_json_hash(actual)}});
+                                };
+                                compare("requestId", request.at("requestId"), reply.payload.value("requestId", nlohmann::json(nullptr)));
+                                compare("inputHash", request.at("payloadHash"), reply.payload.value("inputHash", nlohmann::json(nullptr)));
+                                compare("evaluatorVersion", request.at("evaluatorVersion"), reply.payload.value("evaluatorVersion", nlohmann::json(nullptr)));
+                                compare("startStateHash", start_hash, reply.payload.value("startStateHash", nlohmann::json(nullptr)));
+                                compare("actionHash", action_hash, reply.payload.value("actionHash", nlohmann::json(nullptr)));
+                                compare("planHash", plan_hash, reply.payload.value("planHash", nlohmann::json(nullptr)));
+                                compare("endStateHash", end_hash, reply.payload.value("endStateHash", nlohmann::json(nullptr)));
+                                compare("score", expected_score, reply.payload.value("officialScore", nlohmann::json(nullptr)));
+                                compare("readiness", expected_readiness, reply.payload.value("readiness", nlohmann::json(nullptr)));
+                                compare("termination", "completed", reply.payload.value("termination", nlohmann::json(nullptr)));
+                                if (!mismatches.empty()) {
+                                    result.record["lanWorkerClaimDiagnostics"] = {{"workerEndpointDigest", endpoint_digest}, {"schemaVersion", reply.payload.value("protocolVersion", 0)}, {"evaluatorVersion", reply.payload.value("evaluatorVersion", "")}, {"requestIdDigest", canonical_json_hash(request.at("requestId"))}, {"fields", std::move(mismatches)}, {"mainRevalidationTermination", "completed"}, {"mainRevalidationFailureReason", ""}, {"fallback", "baseline-retained"}};
+                                    result.reason = "candidate-claims-mismatch"; continue;
+                                }
+                                const bool better = planner::better_official_score(candidate_score, baseline_score);
+                                const auto baseline_readiness = planner::daily_readiness(
+                                    setting.value(), daily.value(), baseline_sim, baseline_refuel.visited_spots);
+                                const bool tie_better = candidate_score == baseline_score
+                                    && planner::better_daily_readiness(candidate_readiness, baseline_readiness);
+                                result.record["score"] = expected_score;
+                                result.record["readiness"] = expected_readiness;
+                                result.record["actionHash"] = action_hash;
+                                result.record["planHash"] = plan_hash;
+                                result.record["endStateHash"] = end_hash;
+                                if (better || tie_better) {
+                                    result.plan = parsed.value(); result.simulation = simulation.value(); result.reason = "worker-candidate-adopted"; return result;
+                                }
+                                result.reason = "baseline-retained-lower-or-equal-candidate";
+                            } catch (...) { result.reason = "candidate-response-schema-invalid"; }
+                        }
+                        static_cast<void>(started);
+                        return result;
+                    };
+                }
+                const auto size_worker_cap = setting.value().map.height() == 16 ? std::chrono::milliseconds{5000}
+                    : setting.value().map.height() == 24 ? std::chrono::milliseconds{10000}
+                    : std::chrono::milliseconds{15000};
+                const auto configured_worker_timeout = config_.lan_worker_timeout.count() > 0
+                    ? std::min(config_.lan_worker_timeout, size_worker_cap) : size_worker_cap;
                 auto planned = optimizer::run_daily_deadline_policy(
                     {setting.value(), daily.value(), config_.mode == RunMode::DryRun ? policy_dry_progress : competition.progress()}, *policy, observed_deadline,
                     {config_.planner_candidate_limit, config_.planner_seed},
                     {config_.refuel_candidate_limit, config_.rendezvous_candidate_limit,
                      config_.maximum_refuels_per_patrol, config_.planner_seed},
-                    improvement_config, [&] { return clock_.now(); },
-                    deadline_stages_ ? *deadline_stages_ : optimizer::DailyDeadlineStages{});
+                    improvement_config, [&] { return clock_.now(); }, daily_stages, true,
+                    configured_worker_timeout);
                 planned.record["additionalSafetyReserveMs"] = extra_reserve.count();
                 planned.record["profileId"] = config_.profile_id;
                 planned.record["profileVersion"] = config_.profile_version;
                 planned.record["productionPolicyIdentity"] = config_.production_policy_identity;
                 planned.record["observedEndsAt"] = daily.value().ends_at;
+                planned.record["hardPlanningDeadline"] = daily.value().ends_at - planning_safety_reserve.count();
                 if (config_.mode == RunMode::DryRun && planned.simulation)
                     planned.record["dryRunEndAgentsHash"] = agent_state_identity(
                         core::DailyState{0, daily.value().day, planned.simulation->end_agents, {}, {}});
@@ -857,8 +976,11 @@ RunResult AutoCompetitionClient::run() {
                     {"refuelMs",config_.refuel_budget.count()}, {"optimizerMs",config_.optimizer_budget.count()}};
                 planned.record["effectiveDailyBudgets"] = {{"baselineMaxMs",policy->baseline_max.count()},
                     {"improvementMaxMs",policy->improvement_max.count()}, {"reserveMs",policy->reserve.count()+extra_reserve.count()},
-                    {"stageContract","shared-baseline-monotonic-deadline"}};
-                if (!config_.lan_workers.empty() && planned.plan) {
+                    {"workerMaxMs", setting.value().map.height() == 16 ? 5000 : setting.value().map.height() == 24 ? 10000 : 15000},
+                    {"hardPlanningDeadline","endsAt-minus-10-seconds"},
+                    {"reserveMeaning","admission-and-fallback-guard-only"},
+                    {"stageContract","shared-baseline-worker-optimizer-monotonic-deadline"}};
+                if (false && !config_.lan_workers.empty() && planned.plan) {
                     const char* worker_secret = std::getenv(config_.lan_worker_secret_environment.c_str());
                     nlohmann::json worker_request = {
                         {"requestId", daily_snapshot_identity(setting.value(), daily.value())},
@@ -894,6 +1016,7 @@ RunResult AutoCompetitionClient::run() {
                     std::string worker_reason = "worker-unavailable";
                     if (worker_secret != nullptr && *worker_secret != '\0') {
                         for (const auto& endpoint : config_.lan_workers) {
+                            const auto endpoint_digest = stable_hash(endpoint.host + ":" + std::to_string(endpoint.port));
                             const auto reply = request_lan_worker(endpoint, worker_secret, worker_request,
                                                                    config_.lan_worker_timeout);
                             if (reply.success && reply.payload.value("candidateValidated", false)
@@ -926,19 +1049,72 @@ RunResult AutoCompetitionClient::run() {
                                                               {"position", agent.position.value}, {"fuel", agent.fuel}});
                                     const auto action_hash = canonical_json_hash(reply.payload.at("actions"));
                                     const auto plan_hash = canonical_json_hash({{"actions", reply.payload.at("actions")},
-                                                                                {"types", selected_kinds.size()}});
+                                                                                {"types", selected_kinds}});
                                     const auto end_hash = canonical_json_hash(end_agents);
+                                    nlohmann::json start_agents = nlohmann::json::array();
+                                    for (const auto& agent : daily.value().own_agents)
+                                        start_agents.push_back({{"kind", core::to_int(agent.kind)},
+                                                                {"position", agent.position.value}, {"fuel", agent.fuel}});
+                                    const auto start_hash = canonical_json_hash(start_agents);
                                     const auto claim_score = reply.payload.at("officialScore").get<std::vector<std::int64_t>>();
                                     const auto claim_readiness = reply.payload.at("readiness").get<std::vector<std::int64_t>>();
-                                    const bool claims_match = claim_score == std::vector<std::int64_t>{
-                                        score.total_unique_brands, score.cumulative_daily_unique_brands, score.total_bowls}
-                                        && claim_readiness == std::vector<std::int64_t>{
-                                            readiness.uncollected_spot_reachability, readiness.fuel_reserve,
-                                            readiness.patrol_dispersion, readiness.rendezvous_readiness}
-                                        && reply.payload.value("actionHash", "") == action_hash
-                                        && reply.payload.value("planHash", "") == plan_hash
-                                        && reply.payload.value("endStateHash", "") == end_hash;
-                                    if (!claims_match) { worker_reason = "candidate-claims-mismatch"; continue; }
+                                    const auto expected_score = nlohmann::json::array({
+                                        score.total_unique_brands, score.cumulative_daily_unique_brands, score.total_bowls});
+                                    const auto expected_readiness = nlohmann::json::array({
+                                        readiness.uncollected_spot_reachability, readiness.fuel_reserve,
+                                        readiness.patrol_dispersion, readiness.rendezvous_readiness});
+                                    const auto expected_input_hash = worker_request.at("payloadHash").get<std::string>();
+                                    const auto expected_evaluator = std::string{"daily-improvement-candidate-v1"};
+                                    nlohmann::json mismatches = nlohmann::json::array();
+                                    const auto compare_claim = [&](const std::string& field,
+                                                                   const nlohmann::json& expected,
+                                                                   const nlohmann::json& actual) {
+                                        if (expected == actual) return;
+                                        nlohmann::json item{{"field", field},
+                                                            {"expectedDigest", canonical_json_hash(expected)},
+                                                            {"actualDigest", canonical_json_hash(actual)}};
+                                        if (expected.is_array() && actual.is_array()
+                                            && expected.size() <= 16 && actual.size() <= 16
+                                            && std::all_of(expected.begin(), expected.end(),
+                                                [](const auto& value) { return value.is_number_integer(); })
+                                            && std::all_of(actual.begin(), actual.end(),
+                                                [](const auto& value) { return value.is_number_integer(); })) {
+                                            item["expected"] = expected;
+                                            item["actual"] = actual;
+                                        }
+                                        mismatches.push_back(std::move(item));
+                                    };
+                                    compare_claim("requestId", worker_request.at("requestId"),
+                                                  reply.payload.value("requestId", nlohmann::json(nullptr)));
+                                    compare_claim("inputHash", expected_input_hash,
+                                                  reply.payload.value("inputHash", nlohmann::json(nullptr)));
+                                    compare_claim("evaluatorVersion", expected_evaluator,
+                                                  reply.payload.value("evaluatorVersion", nlohmann::json(nullptr)));
+                                    compare_claim("startStateHash", start_hash,
+                                                  reply.payload.value("startStateHash", nlohmann::json(nullptr)));
+                                    compare_claim("actionHash", action_hash,
+                                                  reply.payload.value("actionHash", nlohmann::json(nullptr)));
+                                    compare_claim("planHash", plan_hash,
+                                                  reply.payload.value("planHash", nlohmann::json(nullptr)));
+                                    compare_claim("endStateHash", end_hash,
+                                                  reply.payload.value("endStateHash", nlohmann::json(nullptr)));
+                                    compare_claim("score", expected_score, claim_score);
+                                    compare_claim("readiness", expected_readiness, claim_readiness);
+                                    compare_claim("termination", "completed",
+                                                  reply.payload.value("termination", nlohmann::json(nullptr)));
+                                    if (!mismatches.empty()) {
+                                        planned.record["lanWorkerClaimDiagnostics"] = {
+                                            {"workerEndpointDigest", endpoint_digest},
+                                            {"schemaVersion", reply.payload.value("protocolVersion", 0)},
+                                            {"evaluatorVersion", reply.payload.value("evaluatorVersion", "")},
+                                            {"requestIdDigest", canonical_json_hash(worker_request.at("requestId"))},
+                                            {"fields", std::move(mismatches)},
+                                            {"mainRevalidationTermination", "completed"},
+                                            {"mainRevalidationFailureReason", ""},
+                                            {"fallback", "baseline-retained"}};
+                                        worker_reason = "candidate-claims-mismatch";
+                                        continue;
+                                    }
                                     const auto score_values = planned.record.value("score", std::vector<std::int64_t>{0, 0, 0});
                                     const auto readiness_values = planned.record.value("readiness", std::vector<std::int64_t>{0, 0, 0, 0});
                                     if (score_values.size() != 3 || readiness_values.size() != 4) {
@@ -960,7 +1136,18 @@ RunResult AutoCompetitionClient::run() {
                                         worker_accepted = true;
                                         worker_reason = "worker-candidate-adopted";
                                     } else worker_reason = "baseline-retained-lower-or-equal-candidate";
-                                } catch (...) { worker_reason = "candidate-response-schema-invalid"; }
+                                } catch (...) {
+                                    worker_reason = "candidate-response-schema-invalid";
+                                    planned.record["lanWorkerClaimDiagnostics"] = {
+                                        {"workerEndpointDigest", endpoint_digest},
+                                        {"schemaVersion", reply.payload.value("protocolVersion", 0)},
+                                        {"evaluatorVersion", reply.payload.value("evaluatorVersion", "")},
+                                        {"requestIdDigest", canonical_json_hash(worker_request.at("requestId"))},
+                                        {"fields", nlohmann::json::array()},
+                                        {"mainRevalidationTermination", "schema-invalid"},
+                                        {"mainRevalidationFailureReason", "candidate response schema invalid"},
+                                        {"fallback", "baseline-retained"}};
+                                }
                                 if (worker_accepted) break;
                             }
                             if (!reply.error.empty()) worker_reason = reply.error;
@@ -969,14 +1156,30 @@ RunResult AutoCompetitionClient::run() {
                     planned.record["lanWorker"] = {
                         {"requested", true}, {"accepted", worker_accepted},
                         {"fallback", !worker_accepted}, {"reason", worker_reason},
-                        {"workerCount", config_.lan_workers.size()}
+                        {"workerCount", config_.lan_workers.size()},
+                        {"fallbackMode", worker_accepted ? "none" : "baseline-retained"}
                     };
                     if (!worker_accepted) output_ << "lan-worker baseline-retained reason=" << worker_reason << '\n';
+                }
+                planned.record["phase"] = "daily-submit";
+                planned.record["submissionAttempted"] = false;
+                planned.record["retryAfterMs"] = nullptr;
+                planned.record["stopReason"] = "";
+                planned.record["fallback"] = planned.plan ? "none" : "baseline-retained";
+                if (!planned.plan) {
+                    planned.record["plannedActionHash"] = nullptr;
+                    planned.record["planHash"] = nullptr;
+                    planned.record["startStateHash"] = agent_state_identity(daily.value());
+                    planned.record["stopReason"] = planned.record.value("failureReason", "planner failure");
+                    planned.record["submissionAttempted"] = false;
                 }
                 competition.record_daily_planning(planned.record);
                 output_ << "daily-deadline " << planned.record.dump() << '\n';
                 protocol::OperationLogEntry entry;
                 entry.operation = "daily-deadline-policy"; entry.day = daily.value().day;
+                entry.phase = "daily-submit";
+                entry.submission_attempted = false;
+                entry.stop_reason = planned.record.value("stopReason", "");
                 entry.result = planned.record.dump(); logger_->write(entry);
                 const auto saved = competition.save(state_path);
                 if (!saved) return {RunStatus::Failed, saved.error().message};
@@ -991,9 +1194,38 @@ RunResult AutoCompetitionClient::run() {
                     dry_metadata->next_state_identity = planned.record.at("endStateHash").get<std::string>();
                     dry_metadata->selection_reason = planned.record.at("adoptionReason").get<std::string>();
                 }
+                // observed_deadline is already hardPlanningDeadline (endsAt - 10s).
+                // Do not subtract policy.reserve again; it only gates starting improvement.
+                const auto submission_deadline = *observed_deadline;
+                if (submission_deadline <= clock_.now()) {
+                    planned.record["stopReason"] = "deadline";
+                    planned.record["fallback"] = "baseline-retained";
+                    planned.record["submissionAttempted"] = false;
+                    competition.record_daily_planning(planned.record);
+                    const auto saved_stop = competition.save(state_path);
+                    if (!saved_stop) return {RunStatus::Failed, saved_stop.error().message};
+                    log_daily_failure(daily.value().day, "deadline", "submission deadline/reserve exceeded");
+                    return {RunStatus::RecoveryRequired, "submission deadline/reserve exceeded"};
+                }
                 auto sent = competition.submit_plan(*planned.plan, config_.mode == RunMode::DryRun,
-                    *observed_deadline - policy->reserve, dry_metadata);
-                if (!sent) return {RunStatus::RecoveryRequired, sent.error().message};
+                    submission_deadline, dry_metadata);
+                if (!sent) {
+                    planned.record["stopReason"] = sent.error().message;
+                    planned.record["fallback"] = "baseline-retained";
+                    planned.record["submissionAttempted"] = sent.error().submission_attempted
+                        ? nlohmann::json(*sent.error().submission_attempted)
+                        : nlohmann::json(nullptr);
+                    planned.record["retryAfterMs"] = sent.error().retry_after_ms
+                        ? nlohmann::json(*sent.error().retry_after_ms) : nlohmann::json(nullptr);
+                    competition.record_daily_planning(planned.record);
+                    const auto saved_stop = competition.save(state_path);
+                    if (!saved_stop) return {RunStatus::Failed, saved_stop.error().message};
+                    log_daily_failure(daily.value().day, "transport-or-deadline", sent.error().message);
+                    return {RunStatus::RecoveryRequired, sent.error().message};
+                }
+                planned.record["submissionAttempted"] = config_.mode == RunMode::DryRun
+                    ? nlohmann::json(false) : nlohmann::json(true);
+                competition.record_daily_planning(planned.record);
                 if (config_.mode == RunMode::DryRun) {
                     dry_processed.insert(daily.value().day);
                     policy_dry_progress = simulator::accumulate_progress(policy_dry_progress, *planned.simulation);
@@ -1020,7 +1252,7 @@ RunResult AutoCompetitionClient::run() {
                     const auto saved_failure = competition.save(state_path);
                     if (!saved_failure) return {RunStatus::Failed, saved_failure.error().message};
                 }
-                return {submitted.error().code == protocol::ErrorCode::UnknownResponse
+                return {submitted.error().submission_attempted != std::optional<bool>{false}
                             ? RunStatus::RecoveryRequired : RunStatus::Failed,
                         submitted.error().message};
             }
@@ -1117,7 +1349,7 @@ RunResult AutoCompetitionClient::run() {
                                         return {RunStatus::Failed, saved_failure.error().message};
                                     }
                                 }
-                                return {improved.error().code == protocol::ErrorCode::UnknownResponse
+                                return {improved.error().submission_attempted != std::optional<bool>{false}
                                             ? RunStatus::RecoveryRequired : RunStatus::Failed,
                                         improved.error().message};
                             }
@@ -1357,7 +1589,7 @@ RunResult AutoCompetitionClient::run() {
                                         if (!sent) {
                                             if (config_.mode == RunMode::Execute)
                                                 static_cast<void>(competition.save(state_path));
-                                            return {sent.error().code == protocol::ErrorCode::UnknownResponse
+                                            return {sent.error().submission_attempted != std::optional<bool>{false}
                                                         ? RunStatus::RecoveryRequired : RunStatus::Failed,
                                                     sent.error().message};
                                         }

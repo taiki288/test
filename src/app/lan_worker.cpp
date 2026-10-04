@@ -166,6 +166,15 @@ nlohmann::json score_json(const planner::OfficialScore& score) {
 
 std::string value_hash(const nlohmann::json& value) { return hex_digest(value.dump()); }
 
+nlohmann::json agents_json(const std::vector<core::AgentState>& agents) {
+    nlohmann::json result = nlohmann::json::array();
+    for (const auto& agent : agents) {
+        result.push_back({{"kind", core::to_int(agent.kind)},
+                          {"position", agent.position.value}, {"fuel", agent.fuel}});
+    }
+    return result;
+}
+
 }  // namespace
 
 std::optional<LanWorkerEndpoint> parse_lan_worker_endpoint(const std::string& value) {
@@ -338,18 +347,17 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                                 } else {
                                     const auto actions = nlohmann::json::parse(encoded.value());
                                     const auto readiness = optimized.value().readiness;
-                                    const nlohmann::json end_state = [&] {
-                                        nlohmann::json agents = nlohmann::json::array();
-                                        for (const auto& agent : optimized.value().simulation.end_agents)
-                                            agents.push_back({{"kind", core::to_int(agent.kind)},
-                                                              {"position", agent.position.value}, {"fuel", agent.fuel}});
-                                        return agents;
-                                    }();
+                                    const nlohmann::json end_state = agents_json(
+                                        optimized.value().simulation.end_agents);
+                                    const nlohmann::json start_state = agents_json(decoded->daily.own_agents);
                                     const auto action_hash = value_hash(actions);
-                                    const auto plan_hash = value_hash({{"actions", actions}, {"types", decoded->types.size()}});
+                                    const auto plan_hash = value_hash({{"actions", actions}, {"types", decoded->types}});
                                     reply = {{"protocolVersion", protocol_version}, {"success", true},
                                              {"requestId", request.value("requestId", "")},
+                                             {"evaluatorVersion", request.value("evaluatorVersion", "")},
                                              {"payloadHash", value_hash(request.at("plannerInput"))},
+                                             {"inputHash", value_hash(request.at("plannerInput"))},
+                                             {"startStateHash", value_hash(start_state)},
                                              {"candidateValidated", true}, {"actions", actions},
                                              {"actionHash", action_hash}, {"planHash", plan_hash},
                                              {"endState", end_state}, {"endStateHash", value_hash(end_state)},

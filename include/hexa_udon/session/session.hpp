@@ -85,6 +85,7 @@ struct SubmissionRecord {
     std::int64_t finished_at_ms = 0;
     std::optional<long> http_status;
     std::optional<std::int32_t> revision;
+    std::optional<bool> submission_attempted;
     SubmissionClassification classification = SubmissionClassification::CommunicationFailed;
     SimulationSummary simulation;
     std::optional<PlannerSubmissionMetadata> planner;

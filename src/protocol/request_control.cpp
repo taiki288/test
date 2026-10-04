@@ -58,6 +58,27 @@ void FileOperationLogger::write(const OperationLogEntry& entry) noexcept {
                             {"elapsedMs", entry.elapsed.count()},
                             {"result", entry.result},
                             {"stateTransition", entry.state_transition}};
+        json["endpoint"] = entry.endpoint;
+        json["phase"] = entry.phase;
+        json["attempt"] = entry.attempt;
+        json["requestStartedAt"] = entry.request_started_utc.empty()
+                                         ? nlohmann::json(nullptr)
+                                         : nlohmann::json(entry.request_started_utc);
+        json["nextRetryAt"] = entry.next_retry_utc.empty()
+                                   ? nlohmann::json(nullptr)
+                                   : nlohmann::json(entry.next_retry_utc);
+        json["backoffReason"] = entry.backoff_reason;
+        json["retryAfterMs"] = entry.retry_after_ms
+                                    ? nlohmann::json(*entry.retry_after_ms)
+                                    : nlohmann::json(nullptr);
+        json["deadlineRemainingMs"] = entry.deadline_remaining_ms
+                                           ? nlohmann::json(*entry.deadline_remaining_ms)
+                                           : nlohmann::json(nullptr);
+        json["stopReason"] = entry.stop_reason;
+        json["responseClassification"] = entry.response_classification;
+        json["submissionAttempted"] = entry.submission_attempted
+                                            ? nlohmann::json(*entry.submission_attempted)
+                                            : nlohmann::json(nullptr);
         json["day"] = entry.day ? nlohmann::json(*entry.day) : nlohmann::json(nullptr);
         json["localSubmissionId"] = entry.local_submission_id
                                         ? nlohmann::json(*entry.local_submission_id)

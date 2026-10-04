@@ -34,6 +34,16 @@ struct DailyDeadlineStages {
         std::chrono::steady_clock::time_point, OptimizerClock)> improve = optimize;
     std::function<simulator::SimulationOutcome(const simulator::DaySimulationInput&,
         const simulator::DayActionPlan&, simulator::TraceMode)> simulate = [](const simulator::DaySimulationInput& input, const simulator::DayActionPlan& plan, simulator::TraceMode trace) { return simulator::simulate_day(input, plan, trace); };
+    struct WorkerResult {
+        std::optional<simulator::DayActionPlan> plan;
+        std::optional<simulator::DaySimulationResult> simulation;
+        nlohmann::json record;
+        std::string reason = "worker-unavailable";
+    };
+    std::function<WorkerResult(const planner::PlannerInput&, const planner::PlannerResult&,
+        const planner::RefuelPlannerResult&, const simulator::DaySimulationResult&,
+        std::chrono::steady_clock::time_point, std::chrono::milliseconds,
+        OptimizerClock)> worker;
 };
 struct DailyDeadlineResult {
     std::optional<simulator::DayActionPlan> plan;
@@ -45,5 +55,6 @@ struct DailyDeadlineResult {
     std::optional<std::chrono::steady_clock::time_point> observed_deadline,
     const planner::PlannerConfig& greedy, const planner::RefuelPlannerConfig& refuel,
     const OptimizerConfig& improvement, OptimizerClock now = [] { return std::chrono::steady_clock::now(); },
-    const DailyDeadlineStages& stages = {}, bool run_improvement = true);
+    const DailyDeadlineStages& stages = {}, bool run_improvement = true,
+    std::chrono::milliseconds worker_configured_timeout = std::chrono::milliseconds{0});
 } // namespace hexa_udon::optimizer

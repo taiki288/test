@@ -2,15 +2,82 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <set>
+#include <sstream>
 #include <tuple>
 
 namespace hexa_udon::optimizer {
 namespace {
 
 constexpr std::size_t neighborhood_count = static_cast<std::size_t>(Neighborhood::Count);
+
+const char* neighborhood_name(const Neighborhood n) {
+    switch (n) {
+    case Neighborhood::SwapWithin: return "SwapWithin";
+    case Neighborhood::RelocateWithin: return "RelocateWithin";
+    case Neighborhood::AddSpot: return "AddSpot";
+    case Neighborhood::AddUncollectedBrand: return "AddUncollectedBrand";
+    case Neighborhood::RemoveSpot: return "RemoveSpot";
+    case Neighborhood::ReplaceSameBrand: return "ReplaceSameBrand";
+    case Neighborhood::MoveBetweenPatrols: return "MoveBetweenPatrols";
+    case Neighborhood::SwapBetweenPatrols: return "SwapBetweenPatrols";
+    case Neighborhood::ReverseSubsequence: return "ReverseSubsequence";
+    case Neighborhood::SetFastest: return "SetFastest";
+    case Neighborhood::SetFuelEfficient: return "SetFuelEfficient";
+    case Neighborhood::MoveRendezvousCell: return "MoveRendezvousCell";
+    case Neighborhood::AdjustRendezvousWait: return "AdjustRendezvousWait";
+    case Neighborhood::ChangeSupply: return "ChangeSupply";
+    case Neighborhood::SwapSupplyTasks: return "SwapSupplyTasks";
+    case Neighborhood::MoveTaskBetweenSupplies: return "MoveTaskBetweenSupplies";
+    case Neighborhood::RemoveRendezvous: return "RemoveRendezvous";
+    case Neighborhood::AddRendezvous: return "AddRendezvous";
+    case Neighborhood::Count: return "Count";
+    }
+    return "unknown";
+}
+
+std::string digest(const std::string& value) {
+    std::uint64_t h = 1469598103934665603ULL;
+    for (const unsigned char c : value) { h ^= c; h *= 1099511628211ULL; }
+    std::ostringstream out;
+    out << std::hex << h;
+    return out.str();
+}
+
+std::string plan_digest(const simulator::DayActionPlan& plan) {
+    std::ostringstream value;
+    for (const auto& actions : plan) {
+        value << '[';
+        for (const auto& action : actions) {
+            if (const auto* move = std::get_if<simulator::MoveAction>(&action))
+                value << 'm' << static_cast<int>(move->direction);
+            else value << 'w' << std::get<simulator::WaitAction>(action).steps;
+            value << ',';
+        }
+        value << ']';
+    }
+    return digest(value.str());
+}
+
+std::string solution_digest(const StructuredSolution& solution) {
+    std::ostringstream value;
+    for (const auto& route : solution.patrol_routes) {
+        value << route.agent_index << ':';
+        for (std::size_t i = 0; i < route.spot_indices.size(); ++i)
+            value << route.spot_indices[i] << '/' << static_cast<int>(route.objectives[i]) << ',';
+        value << ';';
+    }
+    for (const auto& task : solution.rendezvous)
+        value << task.patrol_agent << ',' << task.supply_agent << ',' << task.cell.value << ',' << task.wait_adjustment << ';';
+    return digest(value.str());
+}
+
+std::set<core::Quantity> acquired_brands(const planner::PlannerInput& input) {
+    return {input.previous_progress.acquired_brands.begin(), input.previous_progress.acquired_brands.end()};
+}
 
 template <class T> bool checked_add(const T a, const T b, T& result) {
     if (b > std::numeric_limits<T>::max() - a) return false;
@@ -267,8 +334,9 @@ StructuredSolution solution_from_baseline(const planner::PlannerInput& input,
 }
 
 bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
-    const planner::PlannerInput& input, std::mt19937_64& random) {
+    const planner::PlannerInput& input, std::mt19937_64& random, std::string* mutation_kind) {
     if (s.patrol_routes.empty()) return false;
+    if (mutation_kind != nullptr) *mutation_kind = neighborhood_name(n);
     auto& a = s.patrol_routes[pick(random, s.patrol_routes.size())];
     normalize(a);
     switch (n) {
@@ -304,6 +372,66 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
         const auto at = pick(random, a.spot_indices.size() + 1);
         a.spot_indices.insert(a.spot_indices.begin() + static_cast<std::ptrdiff_t>(at), spot);
         a.objectives.insert(a.objectives.begin() + static_cast<std::ptrdiff_t>(at), pathfinding::RouteObjective::Fastest);
+        return true;
+    }
+    case Neighborhood::AddUncollectedBrand: {
+        const auto acquired = acquired_brands(input);
+        std::set<std::size_t> used;
+        for (const auto& route : s.patrol_routes)
+            used.insert(route.spot_indices.begin(), route.spot_indices.end());
+        std::vector<std::size_t> candidates;
+        for (std::size_t i = 0; i < input.match.spots.size(); ++i)
+            if (!used.contains(i) && !acquired.contains(input.match.spots[i].brand)) candidates.push_back(i);
+        const bool fallback_to_add_spot = candidates.empty();
+        if (fallback_to_add_spot) {
+            // Preserve the old search surface when no uncollected brand is available.
+            std::vector<std::size_t> unused;
+            for (std::size_t i = 0; i < input.match.spots.size(); ++i)
+                if (!used.contains(i)) unused.push_back(i);
+            if (unused.empty()) return false;
+            candidates = std::move(unused);
+        }
+        const auto spot = candidates[pick(random, candidates.size())];
+        const bool can_insert = !a.spot_indices.empty();
+        const bool replace = can_insert && (random() % 3U == 0U);
+        if (replace) {
+            // A replacement keeps route size bounded while directing an existing leg
+            // toward a brand absent from the current progress snapshot.
+            const auto at = pick(random, a.spot_indices.size());
+            a.spot_indices[at] = spot;
+            if (mutation_kind != nullptr) *mutation_kind = "AddUncollectedBrand.route-replace";
+        } else if (can_insert) {
+            // One bounded insertion is chosen near the closest existing route spot.
+            // The strict candidate build below is the fuel/step/refuel feasibility gate.
+            std::size_t route_index = 0;
+            std::size_t insertion = a.spot_indices.size();
+            std::int64_t best_distance = std::numeric_limits<std::int64_t>::max();
+            for (std::size_t r = 0; r < s.patrol_routes.size(); ++r) {
+                const auto& route = s.patrol_routes[r];
+                for (std::size_t i = 0; i < route.spot_indices.size(); ++i) {
+                    const auto distance = std::llabs(static_cast<std::int64_t>(
+                        input.match.spots[route.spot_indices[i]].position.value)
+                        - static_cast<std::int64_t>(input.match.spots[spot].position.value));
+                    if (distance < best_distance) {
+                        best_distance = distance;
+                        route_index = r;
+                        insertion = i + 1;
+                    }
+                }
+            }
+            auto& near_route = s.patrol_routes[route_index];
+            near_route.spot_indices.insert(near_route.spot_indices.begin()
+                + static_cast<std::ptrdiff_t>(insertion), spot);
+            near_route.objectives.insert(near_route.objectives.begin()
+                + static_cast<std::ptrdiff_t>(insertion), pathfinding::RouteObjective::Fastest);
+            if (mutation_kind != nullptr) *mutation_kind = "AddUncollectedBrand.route-insert-nearby";
+        } else {
+            const auto at = pick(random, a.spot_indices.size() + 1);
+            a.spot_indices.insert(a.spot_indices.begin() + static_cast<std::ptrdiff_t>(at), spot);
+            a.objectives.insert(a.objectives.begin() + static_cast<std::ptrdiff_t>(at), pathfinding::RouteObjective::Fastest);
+            if (mutation_kind != nullptr) *mutation_kind = "AddUncollectedBrand.route-append";
+        }
+        if (fallback_to_add_spot && mutation_kind != nullptr) *mutation_kind = "AddSpot";
         return true;
     }
     case Neighborhood::RemoveSpot: {
@@ -462,13 +590,66 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
         result.iterations=iteration+1; const auto neighborhood=static_cast<Neighborhood>(select(random));
         auto& stats=result.neighborhoods[static_cast<std::size_t>(neighborhood)]; ++stats.generated; ++result.generated_candidates;
         auto proposed=current_solution;
-        if(!apply_neighborhood(proposed,neighborhood,input,random)){++stats.prefiltered;++result.prefiltered_candidates;continue;}
+        std::string mutation_kind;
+        if(!apply_neighborhood(proposed,neighborhood,input,random,&mutation_kind)){++stats.prefiltered;++result.prefiltered_candidates;continue;}
         if(now()>=deadline){result.termination=OptimizerTermination::Deadline;break;}
         std::string diagnostic; auto candidate=build_candidate(input,proposed,pathfinder,diagnostic); ++result.simulator_runs; ++stats.simulated;
         if(!candidate){++result.invalid_candidates;++invalid_run;result.diagnostic=std::move(diagnostic);if(invalid_run>=config.maximum_consecutive_invalid){result.termination=OptimizerTermination::InvalidLimit;break;}continue;}
         invalid_run=0;++result.valid_candidates;++stats.valid;
-        bool accept=better(*candidate,current,config.prefer_daily_readiness_on_tie);
-        if(!accept){const auto candidate_ordinal=score_ordinal(candidate->score,bounds);const auto current_ordinal=score_ordinal(current.score,bounds);if(candidate_ordinal&&current_ordinal){const auto delta=static_cast<long double>(candidate_ordinal.value())-static_cast<long double>(current_ordinal.value());const auto temp=std::max(config.final_temperature,temperature(config,iteration));const auto probability=std::exp(static_cast<double>(delta/static_cast<long double>(temp)));accept=std::uniform_real_distribution<double>(0.0,1.0)(random)<probability;}}
+        const bool official_improved = planner::better_official_score(candidate->score, current.score);
+        const bool official_lower = planner::better_official_score(current.score, candidate->score);
+        bool accept = better(*candidate, current, config.prefer_daily_readiness_on_tie);
+        std::string rejection_reason;
+        if (accept) {
+            const bool readiness_changed = planner::better_daily_readiness(candidate->readiness, current.readiness)
+                || planner::better_daily_readiness(current.readiness, candidate->readiness);
+            rejection_reason = official_improved ? "official-score-improved"
+                : (readiness_changed ? "readiness-improved" : "deterministic-tie-break");
+        } else if (official_lower) {
+            const auto candidate_ordinal=score_ordinal(candidate->score,bounds);
+            const auto current_ordinal=score_ordinal(current.score,bounds);
+            if(candidate_ordinal&&current_ordinal){
+                const auto delta=static_cast<long double>(candidate_ordinal.value())-static_cast<long double>(current_ordinal.value());
+                const auto temp=std::max(config.final_temperature,temperature(config,iteration));
+                const auto probability=std::exp(static_cast<double>(delta/static_cast<long double>(temp)));
+                accept=std::uniform_real_distribution<double>(0.0,1.0)(random)<probability;
+            }
+            rejection_reason = accept ? "annealed-lower-official-score" : "lower-official-score-rejected";
+        } else {
+            // OfficialScore equality never enters annealing (delta would be zero).
+            // Readiness and the deterministic internal tie-break are the only tie paths.
+            rejection_reason = "official-score-tie-not-better";
+        }
+        if (result.candidate_diagnostics.size() < 64) {
+            const auto acquired = acquired_brands(input);
+            std::set<core::Quantity> all_brands;
+            for (const auto& spot : input.match.spots) all_brands.insert(spot.brand);
+            std::size_t newly_acquired = 0;
+            for (const auto brand : candidate->simulation.distinct_brands)
+                if (!acquired.contains(brand)) ++newly_acquired;
+            CandidateDiagnostic trace;
+            trace.neighborhood_kind = mutation_kind.empty() ? neighborhood_name(neighborhood) : mutation_kind;
+            trace.fallback_reason = mutation_kind == "AddSpot" ? "no-uncollected-brand" : "";
+            trace.acquired_brand_count = candidate->score.total_unique_brands;
+            trace.newly_acquired_brand_count = static_cast<std::int64_t>(newly_acquired);
+            trace.uncollected_brand_count = static_cast<std::int64_t>(
+                std::count_if(all_brands.begin(), all_brands.end(), [&acquired](const auto brand) {
+                    return !acquired.contains(brand);
+                }));
+            trace.official_score_delta = {candidate->score.total_unique_brands - current.score.total_unique_brands,
+                candidate->score.cumulative_daily_unique_brands - current.score.cumulative_daily_unique_brands,
+                candidate->score.total_bowls - current.score.total_bowls};
+            trace.daily_readiness_delta = {candidate->readiness.uncollected_spot_reachability - current.readiness.uncollected_spot_reachability,
+                candidate->readiness.fuel_reserve - current.readiness.fuel_reserve,
+                candidate->readiness.patrol_dispersion - current.readiness.patrol_dispersion,
+                candidate->readiness.rendezvous_readiness - current.readiness.rendezvous_readiness, {}};
+            trace.accepted = accept;
+            trace.rejection_reason = accept ? "" : rejection_reason;
+            trace.action_hash = plan_digest(candidate->plan);
+            trace.plan_hash = solution_digest(proposed);
+            trace.candidate_hash = digest(trace.action_hash + ":" + trace.plan_hash);
+            result.candidate_diagnostics.push_back(std::move(trace));
+        }
         if(accept){current_solution=std::move(proposed);current=std::move(*candidate);++result.accepted_candidates;++stats.accepted;if(better(current,best,config.prefer_daily_readiness_on_tie)){best=current;best_solution=current_solution;++result.improvements;++stats.improved;}}
     }
     auto final_check=simulator::simulate_day({input.match.map,input.match.spots,input.match.fuel_limit,

@@ -24,19 +24,27 @@ public:
                     RequestRateLimiter* limiter = nullptr,
                     OperationLogger* logger = nullptr);
 
-    [[nodiscard]] Result<core::MatchConfig> get_setting();
+    [[nodiscard]] Result<core::MatchConfig> get_setting(
+        std::optional<SteadyTime> deadline = std::nullopt,
+        const std::string& phase = "pre-match-setting");
     [[nodiscard]] Result<bool> post_agent_kinds(
         const std::vector<core::AgentKind>& kinds,
-        std::optional<SteadyTime> deadline = std::nullopt);
-    [[nodiscard]] Result<core::DailyState> get_state(const core::MatchConfig& config);
+        std::optional<SteadyTime> deadline = std::nullopt,
+        const std::string& phase = "type-submit");
+    [[nodiscard]] Result<core::DailyState> get_state(
+        const core::MatchConfig& config,
+        std::optional<SteadyTime> deadline = std::nullopt,
+        const std::string& phase = "daily-state");
     [[nodiscard]] Result<std::int32_t> post_actions(
         const simulator::DayActionPlan& plan,
-        std::optional<SteadyTime> deadline = std::nullopt);
+        std::optional<SteadyTime> deadline = std::nullopt,
+        const std::string& phase = "daily-submit");
 
 private:
     [[nodiscard]] Result<HttpResponse> request(
         HttpMethod method, const std::string& path, const std::string& body = {},
-        std::optional<SteadyTime> deadline = std::nullopt);
+        std::optional<SteadyTime> deadline = std::nullopt,
+        const std::string& phase = "");
     [[nodiscard]] Error http_error(const HttpResponse& response) const;
     [[nodiscard]] Error redact(Error error) const;
 

@@ -40,7 +40,7 @@ Day1+のoffline研究snapshot、Catalog、実験結果はproduction pathに存�
 |24|2秒|20秒|8秒|
 |32|5秒|30秒|10秒|
 
-当日の`endsAt`とwall clockの差を一度monotonic deadlineへ変換します。固定60秒を実deadlineにはしません。baseline Greedy/Refuelは共通deadlineを使い、`min(configured上限, 実残時間−reserve)`で制限されます。profileの内部100/150ms値と日次wall-clock上限は別契約です。baseline最大枠は待機時間ではなく、早く完了すれば直ちにstrict Simulator検証へ進みます。
+当日の`endsAt`から10秒を差し引いた時刻を`hardPlanningDeadline`としてmonotonic clockへ変換します。baseline Greedy/Refuel、worker、Optimizer、strict Simulatorはこの共有deadlineを使い、最後の10秒を通信・提出余裕として残します。policyの`reserveMs`は改善開始可否・診断・fallback判定だけに使い、共有deadlineから二重に差し引きません。profileの内部100/150ms値と日次wall-clock上限は別契約です。baseline最大枠は待機時間ではなく、早く完了すれば直ちにstrict Simulator検証へ進みます。
 
 32×32もbaselineを最優先し最大5秒枠で構築します。strict検証済みbaselineがある場合だけ、reserve後に最低250msの探索余剰があれば改善を開始します。改善deadlineも`min(上表の上限, baseline完了後の実残時間−reserve)`です。30秒を必ず使い切る設計ではありません。
 

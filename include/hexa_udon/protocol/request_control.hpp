@@ -3,6 +3,7 @@
 #include "hexa_udon/protocol/result.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
@@ -49,6 +50,17 @@ struct OperationLogEntry {
     std::chrono::milliseconds elapsed{0};
     std::string result;
     std::string state_transition;
+    std::string endpoint;
+    std::string phase;
+    std::size_t attempt = 0;
+    std::string request_started_utc;
+    std::string next_retry_utc;
+    std::string backoff_reason;
+    std::optional<std::int64_t> retry_after_ms;
+    std::optional<std::int64_t> deadline_remaining_ms;
+    std::string stop_reason;
+    std::string response_classification;
+    std::optional<bool> submission_attempted;
 };
 
 class OperationLogger {

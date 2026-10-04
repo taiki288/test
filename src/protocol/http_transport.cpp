@@ -3,6 +3,7 @@
 #include <curl/curl.h>
 
 #include <array>
+#include <cctype>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -19,6 +20,28 @@ struct WriteState {
     std::size_t limit;
     bool exceeded = false;
 };
+
+struct HeaderState {
+    std::vector<std::pair<std::string, std::string>> headers;
+};
+
+std::size_t header_callback(char* data, std::size_t size, std::size_t count,
+                            void* pointer) noexcept {
+    auto* state = static_cast<HeaderState*>(pointer);
+    if (size != 0 && count > std::numeric_limits<std::size_t>::max() / size) return 0;
+    const auto bytes = size * count;
+    std::string line(data, bytes);
+    const auto colon = line.find(':');
+    if (colon == std::string::npos) return bytes;
+    auto name = line.substr(0, colon);
+    auto value = line.substr(colon + 1);
+    while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(value.begin());
+    while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' ' || value.back() == '\t')) value.pop_back();
+    for (auto& character : name) character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    state->headers.emplace_back(std::move(name), std::move(value));
+    return bytes;
+}
 
 std::size_t write_callback(
     char* data, std::size_t size, std::size_t count, void* pointer) noexcept {
@@ -97,6 +120,7 @@ Result<HttpResponse> CurlHttpTransport::execute(const HttpRequest& request) {
     }
 
     WriteState write{{}, request.max_response_bytes};
+    HeaderState response_headers;
     curl_slist* headers = nullptr;
     for (const auto& header : request.headers) {
         curl_slist* appended = curl_slist_append(headers, header.c_str());
@@ -118,6 +142,8 @@ Result<HttpResponse> CurlHttpTransport::execute(const HttpRequest& request) {
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response_headers);
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer.data());
     if (request.method == HttpMethod::Post) {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -147,7 +173,8 @@ Result<HttpResponse> CurlHttpTransport::execute(const HttpRequest& request) {
         return Result<HttpResponse>::failure(
             {curl_code(code, connect_time_microseconds), message.substr(0, 256)});
     }
-    return Result<HttpResponse>::success({status, std::move(write.body), elapsed});
+    return Result<HttpResponse>::success({status, std::move(write.body), elapsed,
+                                          std::move(response_headers.headers)});
 }
 
 }  // namespace hexa_udon::protocol

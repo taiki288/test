@@ -1,10 +1,23 @@
 #pragma once
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
 namespace hexa_udon::protocol {
 enum class ErrorCode { DnsFailure, ConnectionRefused, ConnectionTimeout, TransferTimeout, Disconnected, ResponseTooLarge, Transport, UnknownResponse, Http4xx, Http5xx, Auth, AccessTime, EmptyBody, InvalidJson, InvalidSchema, CoreValidation, RejectedRevision, MissingRevision, Persistence, VersionMismatch, Conflict, DeadlineExceeded };
-struct Error { ErrorCode code; std::string message; };
+struct Error {
+    ErrorCode code;
+    std::string message;
+    std::optional<std::int64_t> retry_after_ms;
+    // false: POST was not started, true: a POST was started and received a response,
+    // nullopt: the outcome after starting a POST is unknown.
+    std::optional<bool> submission_attempted;
+    Error(ErrorCode error_code, std::string error_message,
+          std::optional<std::int64_t> retry_after = std::nullopt,
+          std::optional<bool> attempted = std::nullopt)
+        : code(error_code), message(std::move(error_message)), retry_after_ms(retry_after),
+          submission_attempted(attempted) {}
+};
 template <typename T> class Result {
 public:
     [[nodiscard]] static Result success(T value) { return Result(std::move(value)); }
