@@ -47,6 +47,9 @@ private:
         const std::string& phase = "");
     [[nodiscard]] Error http_error(const HttpResponse& response) const;
     [[nodiscard]] Error redact(Error error) const;
+    void log_post_response(const std::string& path, const HttpResponse& response,
+                           const std::string& phase, std::optional<bool> attempted,
+                           const std::string& result) noexcept;
 
     HttpTransport& transport_;
     ApiConfig config_;

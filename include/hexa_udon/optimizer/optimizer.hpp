@@ -143,6 +143,13 @@ struct OptimizerResult {
     OptimizerTermination termination = OptimizerTermination::Fallback;
     std::chrono::microseconds elapsed{0};
     std::string diagnostic;
+    bool best_candidate_at_deadline = false;
+    bool best_candidate_strict_verified = false;
+    std::string best_candidate_action_hash;
+    std::string best_candidate_plan_hash;
+    std::string best_candidate_end_state_hash;
+    std::string best_candidate_neighborhood_kind;
+    std::int64_t best_candidate_evaluated_at_us = 0;
 };
 
 enum class DailyImprovementDecisionReason {

@@ -243,6 +243,12 @@ void SessionController::log_transition(
         entry.level = protocol::OperationLogEntry::Level::Warning;
     entry.state_transition = std::to_string(static_cast<int>(from)) + "->" +
                              std::to_string(static_cast<int>(to));
+    if (result == "agent-post-unknown" || result == "action-post-outcome-unknown") {
+        entry.response_classification = "unknown-post-outcome";
+        entry.submission_attempted = std::nullopt;
+    } else if (to == SessionState::RecoveryRequired) {
+        entry.response_classification = "recovery-required";
+    }
     if (current_day_) entry.day = current_day_->day;
     logger_->write(entry);
 }
@@ -293,6 +299,12 @@ protocol::Result<bool> SessionController::submit_agent_kinds(
     const std::vector<core::AgentKind>& kinds,
     std::optional<protocol::SteadyTime> deadline) {
     std::lock_guard submission_lock(submission_mutex_);
+    if (state_ == SessionState::RecoveryRequired) {
+        return protocol::Result<bool>::failure(
+            {protocol::ErrorCode::Conflict,
+             "recovery is required; automatic type resubmission is disabled",
+             std::nullopt, false});
+    }
     if (kinds.size() != config_.initial_agent_positions.size()) {
         return protocol::Result<bool>::failure(
             {protocol::ErrorCode::CoreValidation, "agent kind count does not match setting"});
@@ -310,7 +322,7 @@ protocol::Result<bool> SessionController::submit_agent_kinds(
     }
     auto result = api_.post_agent_kinds(kinds, deadline, "type-submit");
     if (!result) {
-        if (result.error().code == protocol::ErrorCode::UnknownResponse) {
+        if (!result.error().submission_attempted.has_value()) {
             snapshot_.agent_kinds_unknown = true;
             const auto previous = state_;
             state_ = SessionState::RecoveryRequired;
@@ -435,6 +447,12 @@ protocol::Result<SubmissionRecord> SessionController::submit_plan(
     std::optional<protocol::SteadyTime> deadline,
     std::optional<PlannerSubmissionMetadata> planner) {
     std::lock_guard submission_lock(submission_mutex_);
+    if (state_ == SessionState::RecoveryRequired) {
+        return protocol::Result<SubmissionRecord>::failure(
+            {protocol::ErrorCode::Conflict,
+             "recovery is required; automatic action resubmission is disabled",
+             std::nullopt, false});
+    }
     auto simulation = simulate(plan);
     if (!simulation) {
         auto error = simulation.error();
@@ -505,6 +523,7 @@ protocol::Result<SubmissionRecord> SessionController::submit_plan(
     log.revision = record.revision;
     log.elapsed = std::chrono::milliseconds{record.finished_at_ms - record.started_at_ms};
     log.result = "accepted";
+    log.submission_attempted = true;
     log.state_transition = std::to_string(static_cast<int>(previous)) + "->" +
                            std::to_string(static_cast<int>(state_));
     logger_->write(log);
@@ -781,7 +800,13 @@ protocol::Result<bool> SessionController::restore(const std::filesystem::path& p
         }
         snapshot_ = std::move(loaded);
         rebuild_progress();
-        state_ = SessionState::WaitingForDay;
+        const bool unknown_submission = snapshot_.agent_kinds_unknown
+            || std::any_of(snapshot_.submissions.begin(), snapshot_.submissions.end(),
+                           [](const auto& submission) {
+                               return !submission.submission_attempted.has_value();
+                           });
+        state_ = unknown_submission ? SessionState::RecoveryRequired
+                                    : SessionState::WaitingForDay;
         return protocol::Result<bool>::success(true);
     } catch (const Json::exception& error) {
         return protocol::Result<bool>::failure(

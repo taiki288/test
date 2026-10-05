@@ -117,6 +117,10 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
        {"improvementTermination","not-started"},{"improvementFailureReason",""},
        {"evaluatedCandidates",0},{"validCandidates",0},{"acceptedCandidates",0},
        {"candidateActionHash",nullptr},{"candidatePlanHash",nullptr},{"candidateEndStateHash",nullptr},
+       {"bestCandidateAtDeadline",false},{"bestCandidateActionHash",nullptr},{"bestCandidatePlanHash",nullptr},
+       {"bestCandidateEndStateHash",nullptr},{"bestCandidateOfficialScore",nullptr},{"bestCandidateReadiness",nullptr},
+       {"bestCandidateNeighborhoodKind",nullptr},{"bestCandidateEvaluatedAtUs",nullptr},
+       {"bestCandidateStrictVerified",false},
        {"actionHash",nullptr},{"planHash",nullptr},{"endStateHash",nullptr},{"score",nullptr},{"readiness",nullptr},
        {"termination","input_failure"},{"failureReason",""},{"adoptionReason","no-validated-baseline"},
        {"futureSnapshotRead",false},{"lookaheadRequestCount",0},{"waitFallbackGenerated",false}};
@@ -250,7 +254,42 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
             r["candidateDiagnostics"] = Json::array();
             for (const auto& diagnostic : c.candidate_diagnostics)
                 r["candidateDiagnostics"].push_back(candidate_diagnostic(diagnostic));
-            if(now()>=improvement_deadline || c.termination==OptimizerTermination::Deadline || c.termination==OptimizerTermination::Fallback) {
+            const bool deadline_result = now()>=improvement_deadline || c.termination==OptimizerTermination::Deadline;
+            const bool deadline_best = c.termination==OptimizerTermination::Deadline
+                && c.best_candidate_at_deadline && c.best_candidate_strict_verified;
+            if (deadline_best) {
+                const auto cp=record_plan(c.plan,c.simulation);
+                const auto cs=planner::official_score(in.previous_progress,c.simulation);
+                std::vector<std::vector<std::size_t>> visits(types.size());
+                bool valid_routes=true;
+                for(const auto& route:c.solution.patrol_routes) {
+                    if(route.agent_index>=visits.size()) {valid_routes=false;break;}
+                    visits[route.agent_index]=route.spot_indices;
+                }
+                const auto cr=planner::daily_readiness(in.match,in.daily,c.simulation,visits);
+                r["bestCandidateAtDeadline"]=true;
+                r["bestCandidateActionHash"]=cp["actionHash"];
+                r["bestCandidatePlanHash"]=cp["planHash"];
+                r["bestCandidateEndStateHash"]=cp["endStateHash"];
+                r["bestCandidateOfficialScore"]=score(cs);
+                r["bestCandidateReadiness"]=readiness(cr);
+                r["bestCandidateNeighborhoodKind"]=c.best_candidate_neighborhood_kind;
+                r["bestCandidateEvaluatedAtUs"]=c.best_candidate_evaluated_at_us;
+                r["bestCandidateStrictVerified"]=true;
+                r["candidateActionHash"]=cp["actionHash"];
+                r["candidatePlanHash"]=cp["planHash"];
+                r["candidateEndStateHash"]=cp["endStateHash"];
+                const auto decision=valid_routes ? evaluate_daily_improvement(bs,br,cs,cr) : DailyImprovementDecision{};
+                r["improvementTermination"]="deadline_exhausted_best_available";
+                r["improvementFailureReason"]="";
+                if(valid_routes && now()<stop && decision.adopt) {
+                    result.plan=c.plan; result.simulation=c.simulation; final_score=cs; final_readiness=cr;
+                    r["adoptionReason"]=decision.reason==DailyImprovementDecisionReason::OfficialScoreImproved
+                        ? "official-score-improved" : "readiness-tie-break";
+                } else {
+                    r["adoptionReason"]="baseline-retained";
+                }
+            } else if(deadline_result || c.termination==OptimizerTermination::Fallback) {
                 r["improvementTermination"]="deadline_exhausted";r["improvementFailureReason"]="optimizer deadline/fallback; baseline retained";
             } else {
                 const auto candidate_started=now();
@@ -280,6 +319,10 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
     const auto final=record_plan(*result.plan,*result.simulation);
     for(const auto& key:{"actionHash","planHash","endStateHash"}) r[key]=final[key];
     r["score"]=score(final_score);r["readiness"]=readiness(final_readiness);
+    Json predicted_brands=Json::array();
+    for (const auto brand : result.simulation->distinct_brands) predicted_brands.push_back(brand);
+    r["predictedBrands"]=predicted_brands;
+    r["predictedBalls"]=result.simulation->total_balls;
     r["termination"]="completed";r["finalRemainingMs"]=remaining();r["totalWallUs"]=micros(started);
     if(now()>=stop) {result.plan.reset();result.simulation.reset();r["termination"]="deadline_exhausted";r["failureReason"]="submission reserve reached; do not submit";}
     return result;

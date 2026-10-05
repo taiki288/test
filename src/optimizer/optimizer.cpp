@@ -584,16 +584,27 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
     for(auto& x:weights)if(!std::isfinite(x)||x<0.0)x=0.0;
     std::discrete_distribution<std::size_t> select(weights.begin(),weights.end());
     const auto bounds=score_bounds(input); std::size_t invalid_run=0;
+    bool deadline_hit = false;
+    bool best_is_candidate = false;
+    std::string best_neighborhood_kind;
+    std::chrono::steady_clock::time_point best_evaluated_at = started;
     result.termination=config.maximum_iterations==0?OptimizerTermination::IterationLimit:OptimizerTermination::Completed;
     for(std::size_t iteration=0;iteration<config.maximum_iterations;++iteration){
-        if(now()>=deadline){result.termination=OptimizerTermination::Deadline;break;}
+        if(now()>=deadline){result.termination=OptimizerTermination::Deadline;deadline_hit=true;break;}
         result.iterations=iteration+1; const auto neighborhood=static_cast<Neighborhood>(select(random));
         auto& stats=result.neighborhoods[static_cast<std::size_t>(neighborhood)]; ++stats.generated; ++result.generated_candidates;
         auto proposed=current_solution;
         std::string mutation_kind;
         if(!apply_neighborhood(proposed,neighborhood,input,random,&mutation_kind)){++stats.prefiltered;++result.prefiltered_candidates;continue;}
-        if(now()>=deadline){result.termination=OptimizerTermination::Deadline;break;}
+        if(now()>=deadline){result.termination=OptimizerTermination::Deadline;deadline_hit=true;break;}
         std::string diagnostic; auto candidate=build_candidate(input,proposed,pathfinder,diagnostic); ++result.simulator_runs; ++stats.simulated;
+        // A candidate whose strict build completed after the deadline is not a
+        // deadline best. Keep the previously verified best instead.
+        if (now() >= deadline) {
+            result.termination = OptimizerTermination::Deadline;
+            deadline_hit = true;
+            break;
+        }
         if(!candidate){++result.invalid_candidates;++invalid_run;result.diagnostic=std::move(diagnostic);if(invalid_run>=config.maximum_consecutive_invalid){result.termination=OptimizerTermination::InvalidLimit;break;}continue;}
         invalid_run=0;++result.valid_candidates;++stats.valid;
         const bool official_improved = planner::better_official_score(candidate->score, current.score);
@@ -650,12 +661,21 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
             trace.candidate_hash = digest(trace.action_hash + ":" + trace.plan_hash);
             result.candidate_diagnostics.push_back(std::move(trace));
         }
-        if(accept){current_solution=std::move(proposed);current=std::move(*candidate);++result.accepted_candidates;++stats.accepted;if(better(current,best,config.prefer_daily_readiness_on_tie)){best=current;best_solution=current_solution;++result.improvements;++stats.improved;}}
+        if(accept){current_solution=std::move(proposed);current=std::move(*candidate);++result.accepted_candidates;++stats.accepted;if(better(current,best,config.prefer_daily_readiness_on_tie)){
+                best=current;best_solution=current_solution;++result.improvements;++stats.improved;
+                best_is_candidate=true;
+                best_neighborhood_kind=mutation_kind.empty() ? neighborhood_name(neighborhood) : mutation_kind;
+                best_evaluated_at=now();
+            }}
     }
-    auto final_check=simulator::simulate_day({input.match.map,input.match.spots,input.match.fuel_limit,
-        input.match.day_steps[static_cast<std::size_t>(input.daily.day)],input.daily.own_agents,input.daily.traffic},best.plan,simulator::TraceMode::Enabled);
-    ++result.simulator_runs;
-    if(!final_check)return OptimizerOutcome::failure({planner::PlannerErrorCode::BaselineSimulationFailed,"optimizer final verification failed: "+final_check.error().message});
+    std::optional<simulator::DaySimulationResult> final_check;
+    if (!deadline_hit && now() < deadline) {
+        auto checked=simulator::simulate_day({input.match.map,input.match.spots,input.match.fuel_limit,
+            input.match.day_steps[static_cast<std::size_t>(input.daily.day)],input.daily.own_agents,input.daily.traffic},best.plan,simulator::TraceMode::Enabled);
+        ++result.simulator_runs;
+        if(!checked)return OptimizerOutcome::failure({planner::PlannerErrorCode::BaselineSimulationFailed,"optimizer final verification failed: "+checked.error().message});
+        final_check=std::move(checked).value();
+    }
     const bool fallback_to_baseline = planner::better_official_score(baseline.score, best.score)
         || (config.prefer_daily_readiness_on_tie && best.score == baseline.score
             && planner::better_daily_readiness(baseline.daily_readiness, best.readiness));
@@ -665,12 +685,21 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
         result.termination = OptimizerTermination::Fallback;
     }
     result.plan=std::move(best.plan);
-    result.simulation = fallback_to_baseline ? baseline.simulation : std::move(final_check).value();
+    result.simulation = fallback_to_baseline ? baseline.simulation : (final_check ? std::move(final_check).value() : best.simulation);
     result.score=planner::official_score(input.previous_progress,result.simulation);result.tie_break=best.tie;
     std::vector<std::vector<std::size_t>> final_visits(input.daily.own_agents.size());
     for (const auto& route : best_solution.patrol_routes) final_visits[route.agent_index] = route.spot_indices;
     result.readiness=planner::daily_readiness(input.match,input.daily,result.simulation,final_visits);
     result.solution=std::move(best_solution);result.rendezvous=baseline.rendezvous;result.supply_schedules=baseline.supply_schedules;result.elapsed=std::chrono::duration_cast<std::chrono::microseconds>(now()-started);
+    result.best_candidate_at_deadline = deadline_hit && best_is_candidate && !fallback_to_baseline;
+    result.best_candidate_strict_verified = best_is_candidate && !fallback_to_baseline;
+    if (result.best_candidate_strict_verified) {
+        result.best_candidate_action_hash = plan_digest(result.plan);
+        result.best_candidate_plan_hash = solution_digest(result.solution);
+        result.best_candidate_end_state_hash = digest(result.best_candidate_action_hash + ":" + std::to_string(result.simulation.total_balls));
+        result.best_candidate_neighborhood_kind = best_neighborhood_kind;
+        result.best_candidate_evaluated_at_us = std::chrono::duration_cast<std::chrono::microseconds>(best_evaluated_at-started).count();
+    }
     return OptimizerOutcome::success(std::move(result));
 }
 

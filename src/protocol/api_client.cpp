@@ -36,6 +36,14 @@ std::string response_classification(long status) {
     return "unexpected-status";
 }
 
+std::string operation_name(const std::string& path, const std::string& phase) {
+    if (phase == "daily-submit") return "daily-submit";
+    if (phase == "daily-state") return "daily-state";
+    if (path == "/setting") return "setting";
+    if (path == "/agent") return "agent";
+    return "actions-or-state";
+}
+
 }  // namespace
 
 ProconApiClient::ProconApiClient(HttpTransport& transport, ApiConfig config,
@@ -65,7 +73,7 @@ Result<HttpResponse> ProconApiClient::request(
         OperationLogEntry entry;
         entry.level = OperationLogEntry::Level::Warning;
         entry.timestamp_utc = utc_timestamp();
-        entry.operation = path == "/setting" ? "setting" : path == "/agent" ? "agent" : "actions-or-state";
+        entry.operation = operation_name(path, phase);
         entry.method = method == HttpMethod::Get ? "GET" : "POST";
         entry.path = path;
         entry.endpoint = path;
@@ -101,7 +109,7 @@ Result<HttpResponse> ProconApiClient::request(
     auto response = transport_.execute(request);
     OperationLogEntry entry;
     entry.timestamp_utc = utc_timestamp();
-    entry.operation = path == "/setting" ? "setting" : path == "/agent" ? "agent" : "actions-or-state";
+    entry.operation = operation_name(path, phase);
     entry.method = method == HttpMethod::Get ? "GET" : "POST";
     entry.path = path;
     entry.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -129,8 +137,39 @@ Result<HttpResponse> ProconApiClient::request(
         entry.submission_attempted = response && response.value().status >= 200
             && response.value().status < 300 ? std::optional<bool>{true} : std::nullopt;
     }
-    logger_->write(entry);
+    // A successful HTTP response is not yet a successful application-level POST:
+    // callers still have to validate the response body. They write the final
+    // true/null outcome below, so empty/decode-failed responses cannot be logged
+    // as a successful submission.
+    if (!(method == HttpMethod::Post && response && response.value().status >= 200
+          && response.value().status < 300)) {
+        logger_->write(entry);
+    }
     return response;
+}
+
+void ProconApiClient::log_post_response(const std::string& path,
+                                        const HttpResponse& response,
+                                        const std::string& phase,
+                                        std::optional<bool> attempted,
+                                        const std::string& result) noexcept {
+    OperationLogEntry entry;
+    entry.timestamp_utc = utc_timestamp();
+    entry.operation = operation_name(path, phase);
+    entry.method = "POST";
+    entry.path = path;
+    entry.elapsed = response.elapsed;
+    entry.result = result;
+    entry.endpoint = path;
+    entry.phase = phase;
+    entry.attempt = 1;
+    entry.request_started_utc = entry.timestamp_utc;
+    entry.http_status = response.status;
+    entry.retry_after_ms = retry_after_milliseconds(response);
+    entry.response_classification = response_classification(response.status);
+    entry.submission_attempted = attempted;
+    if (response.status >= 400) entry.level = OperationLogEntry::Level::Warning;
+    logger_->write(entry);
 }
 
 Error ProconApiClient::http_error(const HttpResponse& response) const {
@@ -182,6 +221,7 @@ Result<bool> ProconApiClient::post_agent_kinds(
         error.submission_attempted = std::nullopt;
         return Result<bool>::failure(std::move(error));
     }
+    log_post_response("/agent", response.value(), phase, true, "accepted");
     return Result<bool>::success(true);
 }
 
@@ -226,6 +266,7 @@ Result<std::int32_t> ProconApiClient::post_actions(
         return Result<std::int32_t>::failure(std::move(error));
     }
     if (response.value().body.empty()) {
+        log_post_response("/", response.value(), phase, std::nullopt, "empty-response");
         return Result<std::int32_t>::failure(
             {ErrorCode::EmptyBody, "empty revision response", std::nullopt, std::nullopt});
     }
@@ -233,8 +274,10 @@ Result<std::int32_t> ProconApiClient::post_actions(
     if (!revision) {
         auto error = revision.error();
         error.submission_attempted = std::nullopt;
+        log_post_response("/", response.value(), phase, std::nullopt, "decode-error");
         return Result<std::int32_t>::failure(std::move(error));
     }
+    log_post_response("/", response.value(), phase, true, "accepted");
     return revision;
 }
 

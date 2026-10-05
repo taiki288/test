@@ -280,7 +280,10 @@ protocol::Result<core::DailyState> AutoCompetitionClient::fetch_state(
 bool AutoCompetitionClient::has_unknown_submission(const session::SessionSnapshot& snapshot) const {
     return snapshot.agent_kinds_unknown ||
            std::any_of(snapshot.submissions.begin(), snapshot.submissions.end(), [](const auto& item) {
-        return item.classification == session::SubmissionClassification::UnknownResponse;
+        // Recovery is keyed to the persisted tri-state outcome, not to a
+        // legacy classification name. A null value means POST started but its
+        // outcome is not safely known.
+        return !item.submission_attempted.has_value();
            });
 }
 
@@ -408,6 +411,15 @@ RunResult AutoCompetitionClient::run() {
         auto restored = initial.restore(state_path);
         if (!restored) return {RunStatus::RecoveryRequired, restored.error().message};
         if (has_unknown_submission(initial.snapshot())) {
+            protocol::OperationLogEntry recovery_log;
+            recovery_log.level = protocol::OperationLogEntry::Level::Warning;
+            recovery_log.timestamp_utc = protocol::utc_timestamp();
+            recovery_log.operation = "recovery-required";
+            recovery_log.phase = "recovery";
+            recovery_log.result = "saved POST outcome is unknown";
+            recovery_log.response_classification = "unknown-post-outcome";
+            recovery_log.submission_attempted = std::nullopt;
+            logger_->write(recovery_log);
             return {RunStatus::RecoveryRequired, "saved session contains an unknown POST outcome"};
         }
     }
