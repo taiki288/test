@@ -45,6 +45,8 @@ struct DailyDeadlineStages {
         std::chrono::steady_clock::time_point, std::chrono::milliseconds,
         OptimizerClock)> worker;
 };
+// WorkerResult is a strict candidate handoff only. The App layer owns claim
+// revalidation and the final OfficialScore/Readiness adoption decision.
 struct DailyDeadlineResult {
     std::optional<simulator::DayActionPlan> plan;
     std::optional<simulator::DaySimulationResult> simulation;

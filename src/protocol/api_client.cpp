@@ -30,7 +30,8 @@ std::optional<std::int64_t> retry_after_milliseconds(const HttpResponse& respons
 
 std::string response_classification(long status) {
     if (status >= 200 && status < 300) return "success";
-    if (status == 403 || status == 429) return "rate-limited-or-not-ready";
+    if (status == 403) return "rate-limited-or-not-ready";
+    if (status == 429) return "http-429-rate-limited";
     if (status >= 400 && status < 500) return "client-error";
     if (status >= 500) return "server-error";
     return "unexpected-status";
@@ -67,7 +68,8 @@ Error ProconApiClient::redact(Error error) const {
 
 Result<HttpResponse> ProconApiClient::request(
     HttpMethod method, const std::string& path, const std::string& body,
-    std::optional<SteadyTime> deadline, const std::string& phase) {
+    std::optional<SteadyTime> deadline, const std::string& phase,
+    std::optional<std::uint64_t> local_submission_id, std::size_t attempt) {
     auto permission = limiter_->acquire(deadline);
     if (!permission) {
         OperationLogEntry entry;
@@ -76,19 +78,50 @@ Result<HttpResponse> ProconApiClient::request(
         entry.operation = operation_name(path, phase);
         entry.method = method == HttpMethod::Get ? "GET" : "POST";
         entry.path = path;
+        entry.local_submission_id = local_submission_id;
         entry.endpoint = path;
         entry.phase = phase;
-        entry.attempt = 1;
+        entry.attempt = attempt;
         entry.result = "not-sent";
-        entry.response_classification = "rate-limit-stop";
-        entry.stop_reason = permission.error().message;
+        entry.response_classification = permission.error().code == ErrorCode::DeadlineExceeded
+            ? "deadline-exceeded" : "rate-limit-stop";
+        entry.stop_reason = permission.error().code == ErrorCode::DeadlineExceeded
+            ? "deadline-stop" : permission.error().message;
         if (deadline) {
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 *deadline - std::chrono::steady_clock::now()).count();
             entry.deadline_remaining_ms = std::max<std::int64_t>(0, remaining);
         }
-        logger_->write(entry);
+        if (method == HttpMethod::Post && phase == "daily-submit" && local_submission_id)
+            logger_->update(entry);
+        else
+            logger_->write(entry);
         auto error = permission.error();
+        if (method == HttpMethod::Post) error.submission_attempted = false;
+        return Result<HttpResponse>::failure(std::move(error));
+    }
+    // The limiter uses the same monotonic clock as fake/production callers;
+    // do not start transport at or after the deadline.
+    auto send_check = limiter_->check_deadline(deadline);
+    if (!send_check) {
+        OperationLogEntry entry;
+        entry.level = OperationLogEntry::Level::Warning;
+        entry.timestamp_utc = utc_timestamp();
+        entry.operation = operation_name(path, phase);
+        entry.method = method == HttpMethod::Get ? "GET" : "POST";
+        entry.path = path;
+        entry.local_submission_id = local_submission_id;
+        entry.endpoint = path;
+        entry.phase = phase;
+        entry.attempt = attempt;
+        entry.result = "not-sent";
+        entry.response_classification = "deadline-exceeded";
+        entry.stop_reason = "deadline-stop";
+        if (method == HttpMethod::Post && phase == "daily-submit" && local_submission_id)
+            logger_->update(entry);
+        else
+            logger_->write(entry);
+        auto error = send_check.error();
         if (method == HttpMethod::Post) error.submission_attempted = false;
         return Result<HttpResponse>::failure(std::move(error));
     }
@@ -112,12 +145,13 @@ Result<HttpResponse> ProconApiClient::request(
     entry.operation = operation_name(path, phase);
     entry.method = method == HttpMethod::Get ? "GET" : "POST";
     entry.path = path;
+    entry.local_submission_id = local_submission_id;
     entry.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started);
     entry.result = response ? "http-response" : "transport-error";
     entry.endpoint = path;
     entry.phase = phase;
-    entry.attempt = 1;
+    entry.attempt = attempt;
     entry.request_started_utc = entry.timestamp_utc;
     if (deadline) {
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -143,7 +177,10 @@ Result<HttpResponse> ProconApiClient::request(
     // as a successful submission.
     if (!(method == HttpMethod::Post && response && response.value().status >= 200
           && response.value().status < 300)) {
-        logger_->write(entry);
+        if (method == HttpMethod::Post && phase == "daily-submit" && local_submission_id)
+            logger_->update(entry);
+        else
+            logger_->write(entry);
     }
     return response;
 }
@@ -152,12 +189,14 @@ void ProconApiClient::log_post_response(const std::string& path,
                                         const HttpResponse& response,
                                         const std::string& phase,
                                         std::optional<bool> attempted,
-                                        const std::string& result) noexcept {
+                                        const std::string& result,
+                                        std::optional<std::uint64_t> local_submission_id) noexcept {
     OperationLogEntry entry;
     entry.timestamp_utc = utc_timestamp();
     entry.operation = operation_name(path, phase);
     entry.method = "POST";
     entry.path = path;
+    entry.local_submission_id = local_submission_id;
     entry.elapsed = response.elapsed;
     entry.result = result;
     entry.endpoint = path;
@@ -169,12 +208,14 @@ void ProconApiClient::log_post_response(const std::string& path,
     entry.response_classification = response_classification(response.status);
     entry.submission_attempted = attempted;
     if (response.status >= 400) entry.level = OperationLogEntry::Level::Warning;
-    logger_->write(entry);
+    if (phase == "daily-submit" && local_submission_id) logger_->update(entry);
+    else logger_->write(entry);
 }
 
 Error ProconApiClient::http_error(const HttpResponse& response) const {
     const ErrorCode code = response.status == 401   ? ErrorCode::Auth
                            : response.status == 403 ? ErrorCode::AccessTime
+                           : response.status == 429 ? ErrorCode::Http429
                            : response.status >= 500 ? ErrorCode::Http5xx
                                                     : ErrorCode::Http4xx;
     // Keep response bodies out of diagnostics. HTTP status and safe headers are enough
@@ -183,8 +224,8 @@ Error ProconApiClient::http_error(const HttpResponse& response) const {
 }
 
 Result<core::MatchConfig> ProconApiClient::get_setting(
-    std::optional<SteadyTime> deadline, const std::string& phase) {
-    auto response = request(HttpMethod::Get, "/setting", {}, deadline, phase);
+    std::optional<SteadyTime> deadline, const std::string& phase, std::size_t attempt) {
+    auto response = request(HttpMethod::Get, "/setting", {}, deadline, phase, std::nullopt, attempt);
     if (!response) {
         return Result<core::MatchConfig>::failure(redact(response.error()));
     }
@@ -221,14 +262,14 @@ Result<bool> ProconApiClient::post_agent_kinds(
         error.submission_attempted = std::nullopt;
         return Result<bool>::failure(std::move(error));
     }
-    log_post_response("/agent", response.value(), phase, true, "accepted");
+    log_post_response("/agent", response.value(), phase, true, "accepted", std::nullopt);
     return Result<bool>::success(true);
 }
 
 Result<core::DailyState> ProconApiClient::get_state(
     const core::MatchConfig& config, std::optional<SteadyTime> deadline,
-    const std::string& phase) {
-    auto response = request(HttpMethod::Get, "/", {}, deadline, phase);
+    const std::string& phase, std::size_t attempt) {
+    auto response = request(HttpMethod::Get, "/", {}, deadline, phase, std::nullopt, attempt);
     if (!response) {
         return Result<core::DailyState>::failure(redact(response.error()));
     }
@@ -243,7 +284,7 @@ Result<core::DailyState> ProconApiClient::get_state(
 
 Result<std::int32_t> ProconApiClient::post_actions(
     const simulator::DayActionPlan& plan, std::optional<SteadyTime> deadline,
-    const std::string& phase) {
+    const std::string& phase, std::optional<std::uint64_t> local_submission_id) {
     auto body = encode_actions(plan);
     if (!body) {
         auto error = body.error();
@@ -251,7 +292,7 @@ Result<std::int32_t> ProconApiClient::post_actions(
         return Result<std::int32_t>::failure(std::move(error));
     }
     std::lock_guard lock(post_mutex_);
-    auto response = request(HttpMethod::Post, "/", body.value(), deadline, phase);
+    auto response = request(HttpMethod::Post, "/", body.value(), deadline, phase, local_submission_id);
     if (!response) {
         const auto code = response.error().code;
         if (code == ErrorCode::TransferTimeout || code == ErrorCode::Disconnected) {
@@ -266,7 +307,7 @@ Result<std::int32_t> ProconApiClient::post_actions(
         return Result<std::int32_t>::failure(std::move(error));
     }
     if (response.value().body.empty()) {
-        log_post_response("/", response.value(), phase, std::nullopt, "empty-response");
+        log_post_response("/", response.value(), phase, std::nullopt, "empty-response", local_submission_id);
         return Result<std::int32_t>::failure(
             {ErrorCode::EmptyBody, "empty revision response", std::nullopt, std::nullopt});
     }
@@ -274,10 +315,10 @@ Result<std::int32_t> ProconApiClient::post_actions(
     if (!revision) {
         auto error = revision.error();
         error.submission_attempted = std::nullopt;
-        log_post_response("/", response.value(), phase, std::nullopt, "decode-error");
+        log_post_response("/", response.value(), phase, std::nullopt, "decode-error", local_submission_id);
         return Result<std::int32_t>::failure(std::move(error));
     }
-    log_post_response("/", response.value(), phase, true, "accepted");
+    log_post_response("/", response.value(), phase, true, "accepted", local_submission_id);
     return revision;
 }
 

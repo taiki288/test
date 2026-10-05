@@ -79,6 +79,36 @@ std::set<core::Quantity> acquired_brands(const planner::PlannerInput& input) {
     return {input.previous_progress.acquired_brands.begin(), input.previous_progress.acquired_brands.end()};
 }
 
+std::int64_t hex_distance(const core::MapDefinition& map,
+    const core::CellIndex a, const core::CellIndex b) {
+    const auto first = map.coordinate(a);
+    const auto second = map.coordinate(b);
+    if (!first || !second) return std::numeric_limits<std::int64_t>::max();
+
+    // The map uses an odd-row offset layout. Convert both cells to axial/cube
+    // coordinates so nearby selection follows the map topology, not CellIndex.
+    const auto axial_q = [](const core::HexCoord coordinate) {
+        return static_cast<std::int64_t>(coordinate.col)
+            - static_cast<std::int64_t>(
+                (coordinate.row - (coordinate.row & 1)) / 2);
+    };
+    const auto axial_r = [](const core::HexCoord coordinate) {
+        return static_cast<std::int64_t>(coordinate.row);
+    };
+    const auto first_q = axial_q(*first);
+    const auto first_r = axial_r(*first);
+    const auto second_q = axial_q(*second);
+    const auto second_r = axial_r(*second);
+    const auto first_x = first_q;
+    const auto first_z = first_r;
+    const auto first_y = -first_x - first_z;
+    const auto second_x = second_q;
+    const auto second_z = second_r;
+    const auto second_y = -second_x - second_z;
+    return (std::llabs(first_x - second_x) + std::llabs(first_y - second_y)
+        + std::llabs(first_z - second_z)) / 2;
+}
+
 template <class T> bool checked_add(const T a, const T b, T& result) {
     if (b > std::numeric_limits<T>::max() - a) return false;
     result = static_cast<T>(a + b); return true;
@@ -334,9 +364,11 @@ StructuredSolution solution_from_baseline(const planner::PlannerInput& input,
 }
 
 bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
-    const planner::PlannerInput& input, std::mt19937_64& random, std::string* mutation_kind) {
+    const planner::PlannerInput& input, std::mt19937_64& random,
+    std::string* mutation_kind, std::string* fallback_reason) {
     if (s.patrol_routes.empty()) return false;
     if (mutation_kind != nullptr) *mutation_kind = neighborhood_name(n);
+    if (fallback_reason != nullptr) *fallback_reason = {};
     auto& a = s.patrol_routes[pick(random, s.patrol_routes.size())];
     normalize(a);
     switch (n) {
@@ -377,11 +409,18 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
     case Neighborhood::AddUncollectedBrand: {
         const auto acquired = acquired_brands(input);
         std::set<std::size_t> used;
+        std::set<core::Quantity> planned_brands;
         for (const auto& route : s.patrol_routes)
-            used.insert(route.spot_indices.begin(), route.spot_indices.end());
+            for (const auto spot : route.spot_indices) {
+                if (spot >= input.match.spots.size()) continue;
+                used.insert(spot);
+                planned_brands.insert(input.match.spots[spot].brand);
+            }
         std::vector<std::size_t> candidates;
         for (std::size_t i = 0; i < input.match.spots.size(); ++i)
-            if (!used.contains(i) && !acquired.contains(input.match.spots[i].brand)) candidates.push_back(i);
+            if (!used.contains(i) && !acquired.contains(input.match.spots[i].brand)
+                && !planned_brands.contains(input.match.spots[i].brand))
+                candidates.push_back(i);
         const bool fallback_to_add_spot = candidates.empty();
         if (fallback_to_add_spot) {
             // Preserve the old search surface when no uncollected brand is available.
@@ -390,43 +429,44 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
                 if (!used.contains(i)) unused.push_back(i);
             if (unused.empty()) return false;
             candidates = std::move(unused);
+            if (fallback_reason != nullptr) *fallback_reason = "no-uncollected-brand";
         }
         const auto spot = candidates[pick(random, candidates.size())];
         const bool can_insert = !a.spot_indices.empty();
-        const bool replace = can_insert && (random() % 3U == 0U);
+        const auto mutation_choice = random() % 3U;
+        const bool replace = can_insert && mutation_choice == 0U;
+        const bool insert_nearby = can_insert && mutation_choice == 1U;
         if (replace) {
             // A replacement keeps route size bounded while directing an existing leg
             // toward a brand absent from the current progress snapshot.
             const auto at = pick(random, a.spot_indices.size());
             a.spot_indices[at] = spot;
             if (mutation_kind != nullptr) *mutation_kind = "AddUncollectedBrand.route-replace";
-        } else if (can_insert) {
+        } else if (insert_nearby) {
             // One bounded insertion is chosen near the closest existing route spot.
             // The strict candidate build below is the fuel/step/refuel feasibility gate.
-            std::size_t route_index = 0;
             std::size_t insertion = a.spot_indices.size();
             std::int64_t best_distance = std::numeric_limits<std::int64_t>::max();
-            for (std::size_t r = 0; r < s.patrol_routes.size(); ++r) {
-                const auto& route = s.patrol_routes[r];
-                for (std::size_t i = 0; i < route.spot_indices.size(); ++i) {
-                    const auto distance = std::llabs(static_cast<std::int64_t>(
-                        input.match.spots[route.spot_indices[i]].position.value)
-                        - static_cast<std::int64_t>(input.match.spots[spot].position.value));
-                    if (distance < best_distance) {
-                        best_distance = distance;
-                        route_index = r;
-                        insertion = i + 1;
-                    }
+            std::size_t nearest_spot = std::numeric_limits<std::size_t>::max();
+            for (std::size_t i = 0; i < a.spot_indices.size(); ++i) {
+                const auto route_spot = a.spot_indices[i];
+                if (route_spot >= input.match.spots.size()) continue;
+                const auto distance = hex_distance(input.match.map,
+                    input.match.spots[route_spot].position, input.match.spots[spot].position);
+                if (distance < best_distance
+                    || (distance == best_distance && route_spot < nearest_spot)) {
+                    best_distance = distance;
+                    nearest_spot = route_spot;
+                    insertion = i + 1;
                 }
             }
-            auto& near_route = s.patrol_routes[route_index];
-            near_route.spot_indices.insert(near_route.spot_indices.begin()
+            a.spot_indices.insert(a.spot_indices.begin()
                 + static_cast<std::ptrdiff_t>(insertion), spot);
-            near_route.objectives.insert(near_route.objectives.begin()
+            a.objectives.insert(a.objectives.begin()
                 + static_cast<std::ptrdiff_t>(insertion), pathfinding::RouteObjective::Fastest);
             if (mutation_kind != nullptr) *mutation_kind = "AddUncollectedBrand.route-insert-nearby";
         } else {
-            const auto at = pick(random, a.spot_indices.size() + 1);
+            const auto at = a.spot_indices.size();
             a.spot_indices.insert(a.spot_indices.begin() + static_cast<std::ptrdiff_t>(at), spot);
             a.objectives.insert(a.objectives.begin() + static_cast<std::ptrdiff_t>(at), pathfinding::RouteObjective::Fastest);
             if (mutation_kind != nullptr) *mutation_kind = "AddUncollectedBrand.route-append";
@@ -595,7 +635,8 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
         auto& stats=result.neighborhoods[static_cast<std::size_t>(neighborhood)]; ++stats.generated; ++result.generated_candidates;
         auto proposed=current_solution;
         std::string mutation_kind;
-        if(!apply_neighborhood(proposed,neighborhood,input,random,&mutation_kind)){++stats.prefiltered;++result.prefiltered_candidates;continue;}
+        std::string fallback_reason;
+        if(!apply_neighborhood(proposed,neighborhood,input,random,&mutation_kind,&fallback_reason)){++stats.prefiltered;++result.prefiltered_candidates;continue;}
         if(now()>=deadline){result.termination=OptimizerTermination::Deadline;deadline_hit=true;break;}
         std::string diagnostic; auto candidate=build_candidate(input,proposed,pathfinder,diagnostic); ++result.simulator_runs; ++stats.simulated;
         // A candidate whose strict build completed after the deadline is not a
@@ -640,7 +681,7 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
                 if (!acquired.contains(brand)) ++newly_acquired;
             CandidateDiagnostic trace;
             trace.neighborhood_kind = mutation_kind.empty() ? neighborhood_name(neighborhood) : mutation_kind;
-            trace.fallback_reason = mutation_kind == "AddSpot" ? "no-uncollected-brand" : "";
+            trace.fallback_reason = fallback_reason;
             trace.acquired_brand_count = candidate->score.total_unique_brands;
             trace.newly_acquired_brand_count = static_cast<std::int64_t>(newly_acquired);
             trace.uncollected_brand_count = static_cast<std::int64_t>(

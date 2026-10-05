@@ -207,6 +207,8 @@ SubmissionClassification classification_for(const protocol::Error& error) {
             return SubmissionClassification::AuthenticationFailed;
         case protocol::ErrorCode::AccessTime:
             return SubmissionClassification::AccessTimeError;
+        case protocol::ErrorCode::Http429:
+            return SubmissionClassification::AccessTimeError;
         case protocol::ErrorCode::UnknownResponse:
             return SubmissionClassification::UnknownResponse;
         default:
@@ -485,13 +487,35 @@ protocol::Result<SubmissionRecord> SessionController::submit_plan(
         return protocol::Result<SubmissionRecord>::success(record);
     }
 
-    auto submitted = api_.post_actions(plan, deadline, "daily-submit");
+    protocol::OperationLogEntry pending;
+    pending.timestamp_utc = protocol::utc_timestamp();
+    pending.operation = "daily-submit";
+    pending.method = "POST";
+    pending.path = "/";
+    pending.day = record.day;
+    pending.local_submission_id = record.local_id;
+    pending.phase = "daily-submit";
+    pending.result = "not-started";
+    pending.response_classification = "pending";
+    pending.submission_attempted = false;
+    logger_->write(pending);
+
+    auto submitted = api_.post_actions(plan, deadline, "daily-submit", record.local_id);
     record.finished_at_ms = now_milliseconds();
     if (!submitted) {
         record.submission_attempted = submitted.error().submission_attempted;
         record.classification = classification_for(submitted.error());
+        pending.result = record.submission_attempted.has_value()
+            ? (*record.submission_attempted ? "post-error" : "not-sent")
+            : "unknown-post-outcome";
+        pending.response_classification = record.submission_attempted == false
+            ? "pre-submit-error" : (record.submission_attempted == true
+                ? "post-error" : "unknown-post-outcome");
+        pending.stop_reason = submitted.error().message;
+        pending.submission_attempted = record.submission_attempted;
+        logger_->update(pending);
         snapshot_.submissions.push_back(record);
-        if (!record.submission_attempted || *record.submission_attempted) {
+        if (!record.submission_attempted.has_value()) {
             const auto previous = state_;
             state_ = SessionState::RecoveryRequired;
             log_transition(previous, state_, "action-post-outcome-unknown");
@@ -503,6 +527,12 @@ protocol::Result<SubmissionRecord> SessionController::submit_plan(
     record.revision = submitted.value();
     record.submission_attempted = true;
     record.classification = SubmissionClassification::Accepted;
+    pending.result = "accepted";
+    pending.response_classification = "success";
+    pending.http_status = record.http_status;
+    pending.revision = record.revision;
+    pending.submission_attempted = true;
+    logger_->update(pending);
     snapshot_.submissions.push_back(record);
     auto existing = snapshot_.accepted_days.find(record.day);
     if (existing == snapshot_.accepted_days.end() || submitted.value() > existing->second.revision) {

@@ -77,9 +77,10 @@ bool wait_fd(int fd, bool writable, std::chrono::milliseconds timeout) {
     return result > 0 && FD_ISSET(fd, &set);
 }
 
-nlohmann::json response_failure(const std::string& reason) {
+nlohmann::json response_failure(const std::string& reason,
+                                const std::string& termination = "worker-failure") {
     return { {"protocolVersion", protocol_version}, {"success", false},
-             {"termination", "worker-failure"}, {"failureReason", reason},
+             {"termination", termination}, {"failureReason", reason},
              {"futureSnapshotRead", false}, {"lookahead", 0},
              {"networkRequests", 0}, {"postCount", 0} };
 }
@@ -206,6 +207,13 @@ std::string worker_auth_digest(const std::string& secret, const nlohmann::json& 
     return hex_digest(secret + "\n" + canonical.dump());
 }
 
+std::string map_identity_digest(const core::MapDefinition& map) {
+    std::ostringstream canonical;
+    canonical << map.height() << 'x' << map.width() << ':';
+    for (const auto terrain : map.cells()) canonical << core::to_int(terrain) << ',';
+    return hex_digest(canonical.str());
+}
+
 LanWorkerReply request_lan_worker(const LanWorkerEndpoint& endpoint,
                                   const std::string& secret,
                                   const nlohmann::json& request,
@@ -277,7 +285,11 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
     if (!bind_result
         || ::bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0
         || ::listen(server, 4) != 0) { ::close(server); output << "worker-error=listen\n"; return 1; }
-    output << "worker=ready address=" << config.listen.host << ':' << config.listen.port << "\n";
+    output << "worker=ready endpointDigest="
+           << hex_digest(config.listen.host + ":" + std::to_string(config.listen.port)) << "\n";
+    output << "worker-event phase=start workerIndex=" << config.worker_index
+           << " workerCount=" << config.worker_count
+           << " endpointDigest=" << hex_digest(config.listen.host + ":" + std::to_string(config.listen.port)) << '\n';
     while (!stop_requested()) {
         if (!wait_fd(server, false, std::chrono::milliseconds{100})) continue;
         const int client = ::accept(server, nullptr, nullptr);
@@ -287,11 +299,18 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
         if (!line) reply = response_failure("malformed-or-oversized-request");
         else try {
             const auto request = nlohmann::json::parse(*line);
+            const auto planner_input_json = request.value("plannerInput", nlohmann::json::object());
+            output << "worker-event phase=received workerIndex="
+                   << request.value("workerIndex", config.worker_index)
+                   << " workerCount=" << request.value("workerCount", config.worker_count)
+                   << " requestIdDigest=" << hex_digest(request.value("requestId", ""))
+                   << " inputHash=" << request.value("payloadHash", "")
+                   << " seed=" << planner_input_json.value("plannerSeed", std::uint64_t{0}) << '\n';
             static const std::set<std::string> allowed_request{
                 "protocolVersion", "requestId", "auth", "evaluatorVersion", "day", "size",
                 "agentCount", "typeIdentity", "snapshotIdentity", "mapIdentity", "stateIdentity",
                 "policyIdentity", "workerBudgetMs", "futureSnapshotRead", "lookahead", "startAgents",
-                "traffic", "plannerInput", "payloadHash"};
+                "traffic", "plannerInput", "payloadHash", "workerIndex", "workerCount"};
             bool unknown = false;
             for (const auto& item : request.items()) unknown = unknown || !allowed_request.contains(item.key());
             const auto supplied = request.value("auth", "");
@@ -325,13 +344,13 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                     planner::PlannerConfig planner_config{2000, decoded->seed};
                     auto baseline = planner::make_greedy_plan(planner_input, planner_config, deadline);
                     if (!baseline) {
-                        reply = response_failure("baseline-planner-failure");
+                        reply = response_failure("baseline-planner-failure", "planner_failure");
                     } else {
                         planner::RefuelPlannerConfig refuel_config{};
                         refuel_config.seed = decoded->seed;
                         auto refuel = planner::make_refuel_plan(planner_input, baseline.value(), refuel_config, deadline);
                         if (!refuel) {
-                            reply = response_failure("refuel-planner-failure");
+                            reply = response_failure("refuel-planner-failure", "planner_failure");
                         } else {
                             optimizer::OptimizerConfig optimizer_config{};
                             optimizer_config.seed = decoded->seed;
@@ -339,22 +358,53 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                             auto optimized = optimizer::optimize(planner_input, baseline.value(), refuel.value(),
                                                                  optimizer_config, deadline);
                             if (!optimized) {
-                                reply = response_failure("optimizer-failure");
+                                reply = response_failure("optimizer-failure", "planner_failure");
                             } else {
                                 const auto encoded = protocol::encode_actions(optimized.value().plan);
                                 if (!encoded) {
-                                    reply = response_failure("action-encoding-failure");
+                                    reply = response_failure("action-encoding-failure", "planner_failure");
                                 } else {
                                     const auto actions = nlohmann::json::parse(encoded.value());
-                                    const auto readiness = optimized.value().readiness;
+                                    // Readiness must use the same observed acquisitions as the
+                                    // main PC strict revalidation, not the planner route claim.
+                                    std::vector<std::vector<std::size_t>> visited(
+                                        optimized.value().simulation.acquisitions.size());
+                                    for (std::size_t index = 0; index < visited.size(); ++index)
+                                        visited[index] = optimized.value().simulation.acquisitions[index].spot_indices;
+                                    const auto readiness = planner::daily_readiness(
+                                        decoded->match, decoded->daily,
+                                        optimized.value().simulation, visited);
                                     const nlohmann::json end_state = agents_json(
                                         optimized.value().simulation.end_agents);
                                     const nlohmann::json start_state = agents_json(decoded->daily.own_agents);
                                     const auto action_hash = value_hash(actions);
                                     const auto plan_hash = value_hash({{"actions", actions}, {"types", decoded->types}});
+                                    const auto termination = [&] {
+                                        switch (optimized.value().termination) {
+                                        case optimizer::OptimizerTermination::Deadline:
+                                            return optimized.value().best_candidate_at_deadline
+                                                && optimized.value().best_candidate_strict_verified
+                                                ? std::string{"deadline_exhausted_best_available"}
+                                                : std::string{"deadline_exhausted"};
+                                        case optimizer::OptimizerTermination::Completed:
+                                            return std::string{"completed"};
+                                        case optimizer::OptimizerTermination::IterationLimit:
+                                            return std::string{"iteration_limit"};
+                                        case optimizer::OptimizerTermination::Fallback:
+                                            return std::string{"fallback"};
+                                        case optimizer::OptimizerTermination::InvalidLimit:
+                                            return std::string{"planner_failure"};
+                                        }
+                                        return std::string{"planner_failure"};
+                                    }();
                                     reply = {{"protocolVersion", protocol_version}, {"success", true},
                                              {"requestId", request.value("requestId", "")},
                                              {"evaluatorVersion", request.value("evaluatorVersion", "")},
+                                             {"policyIdentity", request.value("policyIdentity", nlohmann::json(nullptr))},
+                                             {"mapIdentity", map_identity_digest(decoded->match.map)},
+                                             {"plannerSeed", decoded->seed},
+                                             {"workerIndex", request.value("workerIndex", -1)},
+                                             {"workerCount", request.value("workerCount", 0)},
                                              {"payloadHash", value_hash(request.at("plannerInput"))},
                                              {"inputHash", value_hash(request.at("plannerInput"))},
                                              {"startStateHash", value_hash(start_state)},
@@ -369,9 +419,20 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                                              {"validCandidates", optimized.value().valid_candidates},
                                              {"acceptedCandidates", optimized.value().accepted_candidates},
                                              {"runtimeUs", optimized.value().elapsed.count()},
-                                             {"termination", "completed"}, {"failureReason", ""},
+                                             {"bestCandidateAtDeadline", optimized.value().best_candidate_at_deadline},
+                                             {"bestCandidateStrictVerified", optimized.value().best_candidate_strict_verified},
+                                             {"termination", termination}, {"failureReason", ""},
                                              {"futureSnapshotRead", false}, {"lookahead", 0},
                                              {"networkRequests", 0}, {"postCount", 0}};
+                                    output << "worker-event phase=planned workerIndex="
+                                           << request.value("workerIndex", config.worker_index)
+                                           << " elapsedMs=" << optimized.value().elapsed.count() / 1000
+                                           << " termination=" << termination
+                                           << " candidateCount=" << optimized.value().generated_candidates
+                                           << " score=" << optimized.value().score.total_unique_brands << ','
+                                           << optimized.value().score.cumulative_daily_unique_brands << ','
+                                           << optimized.value().score.total_bowls
+                                           << " readinessDigest=" << value_hash(reply.at("readiness")) << '\n';
                                 }
                             }
                         }
@@ -381,6 +442,10 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
         } catch (...) { reply = response_failure("malformed-json"); }
         const auto encoded = reply.dump() + "\n";
         static_cast<void>(write_all(client, encoded));
+        output << "worker-event phase=reply workerIndex="
+               << reply.value("workerIndex", config.worker_index)
+               << " requestIdDigest=" << hex_digest(reply.value("requestId", ""))
+               << " replySent=true\n";
         ::close(client);
     }
     ::close(server);

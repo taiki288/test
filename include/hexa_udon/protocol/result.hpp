@@ -4,7 +4,7 @@
 #include <string>
 #include <utility>
 namespace hexa_udon::protocol {
-enum class ErrorCode { DnsFailure, ConnectionRefused, ConnectionTimeout, TransferTimeout, Disconnected, ResponseTooLarge, Transport, UnknownResponse, Http4xx, Http5xx, Auth, AccessTime, EmptyBody, InvalidJson, InvalidSchema, CoreValidation, RejectedRevision, MissingRevision, Persistence, VersionMismatch, Conflict, DeadlineExceeded };
+enum class ErrorCode { DnsFailure, ConnectionRefused, ConnectionTimeout, TransferTimeout, Disconnected, ResponseTooLarge, Transport, UnknownResponse, Http4xx, Http429, Http5xx, Auth, AccessTime, EmptyBody, InvalidJson, InvalidSchema, CoreValidation, RejectedRevision, MissingRevision, Persistence, VersionMismatch, Conflict, DeadlineExceeded };
 struct Error {
     ErrorCode code;
     std::string message;

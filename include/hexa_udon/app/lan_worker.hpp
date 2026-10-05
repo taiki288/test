@@ -1,5 +1,7 @@
 #pragma once
 
+#include "hexa_udon/core/map_definition.hpp"
+
 #include <chrono>
 #include <functional>
 #include <iosfwd>
@@ -19,6 +21,8 @@ struct LanWorkerConfig {
     LanWorkerEndpoint listen;
     std::string secret_environment;
     std::size_t maximum_frame_bytes = 262144;
+    std::size_t worker_index = 0;
+    std::size_t worker_count = 1;
 };
 
 struct LanWorkerReply {
@@ -32,6 +36,7 @@ struct LanWorkerReply {
 [[nodiscard]] bool is_allowed_worker_address(const std::string& host);
 [[nodiscard]] std::string worker_auth_digest(const std::string& secret,
                                               const nlohmann::json& request);
+[[nodiscard]] std::string map_identity_digest(const core::MapDefinition& map);
 
 [[nodiscard]] LanWorkerReply request_lan_worker(
     const LanWorkerEndpoint& endpoint,

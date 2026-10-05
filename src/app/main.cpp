@@ -15,6 +15,27 @@
 #include <string>
 
 namespace {
+
+const char* safe_error_classification(hexa_udon::protocol::ErrorCode code) noexcept {
+    using ErrorCode = hexa_udon::protocol::ErrorCode;
+    switch (code) {
+    case ErrorCode::DnsFailure: return "dns-failure";
+    case ErrorCode::ConnectionRefused: return "connection-refused";
+    case ErrorCode::ConnectionTimeout: return "connection-timeout";
+    case ErrorCode::TransferTimeout: return "transfer-timeout";
+    case ErrorCode::Disconnected: return "disconnected";
+    case ErrorCode::Auth: return "authentication-failure";
+    case ErrorCode::AccessTime: return "rate-limited-or-not-ready";
+    case ErrorCode::Http429: return "http-429-rate-limited";
+    case ErrorCode::Http4xx: return "http-client-error";
+    case ErrorCode::Http5xx: return "http-server-error";
+    case ErrorCode::EmptyBody: return "empty-response";
+    case ErrorCode::InvalidJson: return "invalid-json";
+    case ErrorCode::InvalidSchema: return "invalid-schema";
+    case ErrorCode::DeadlineExceeded: return "deadline-exceeded";
+    default: return "check-failed";
+    }
+}
 namespace app = hexa_udon::app;
 namespace protocol = hexa_udon::protocol;
 
@@ -269,9 +290,14 @@ int main(int argc, char** argv) {
     api_config.total_timeout = std::chrono::milliseconds{options->total_timeout_ms};
     protocol::ProconApiClient api(transport, api_config, nullptr, &logger);
     if (options->command == "check") {
-        std::cout << "mode=CHECK baseUrl=" << options->base_url << '\n';
+        std::cout << "mode=CHECK baseUrlConfigured=true\n";
         const auto setting = api.get_setting();
-        if (!setting) { std::cerr << "connection-check=failed message=" << setting.error().message << '\n'; return 1; }
+        if (!setting) {
+            // Never expose transport messages: curl/DNS errors can contain the configured host.
+            std::cerr << "connection-check=failed code="
+                      << safe_error_classification(setting.error().code) << '\n';
+            return 1;
+        }
         std::cout << "connection-check=ok startsAt=" << setting.value().starts_at
                   << " agents=" << setting.value().initial_agent_positions.size()
                   << " days=" << setting.value().day_steps.size() << '\n';

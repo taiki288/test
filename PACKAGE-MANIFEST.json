@@ -41,7 +41,7 @@
     },
     {
       "path": "docs/operations.md",
-      "sha256": "148120fe4c0c5df4491f4e084414bc7b2ebb2844fc6a45eb5178804e373daa59"
+      "sha256": "e4b16a0e5506590e6cce40a81dccbe7f688180afc1a8acf1ae6aff3a406a4506"
     },
     {
       "path": "docs/recovery.md",
@@ -57,7 +57,7 @@
     },
     {
       "path": "include/hexa_udon/app/lan_worker.hpp",
-      "sha256": "0834e2e6d7f04ab534e121ea8ee45f7da13d611356e4b74703fb12b5ea32f045"
+      "sha256": "851740fff325ebb1a789b8603202c349f20faec035f35468dd981e69b2e15a29"
     },
     {
       "path": "include/hexa_udon/app/production_profile.hpp",
@@ -85,11 +85,11 @@
     },
     {
       "path": "include/hexa_udon/optimizer/daily_deadline_policy.hpp",
-      "sha256": "a1be34d133b7f0e4aac1b1ae5ece9e77686a2eeb9865a1846a6f37fc6183391a"
+      "sha256": "a7e7f0a2d7c61f814342df78e48611fbe8e4dc0c97271dd1485612f27d7a0460"
     },
     {
       "path": "include/hexa_udon/optimizer/optimizer.hpp",
-      "sha256": "f5d5d2dde1e8c8574c67ae045b5099a1d96e490b8cb0f6f3f49d569487d66a71"
+      "sha256": "b52242c1368fd8f181769915322a1281c886be98e266f563f8e76c77ee0d3ae5"
     },
     {
       "path": "include/hexa_udon/pathfinding/important_point_routes.hpp",
@@ -113,7 +113,7 @@
     },
     {
       "path": "include/hexa_udon/protocol/api_client.hpp",
-      "sha256": "34b9d52bb97f181770fb81f402fd7fafef009b60b38ec383bc52de5585b6fd01"
+      "sha256": "df66a3a835fc1b8d244d59b1ce4310ec8f7886be5e3d8e4d6b5e494c89efa19d"
     },
     {
       "path": "include/hexa_udon/protocol/http_transport.hpp",
@@ -125,11 +125,11 @@
     },
     {
       "path": "include/hexa_udon/protocol/request_control.hpp",
-      "sha256": "0828cbebd66b4f7d9ea0f09c05d35a0d0cd62008bf082593b2636c020a19ab52"
+      "sha256": "747b30b2abf88e836e3e7f3271a9fa8573bc44ed9d77c70807ce574c5fd11ab1"
     },
     {
       "path": "include/hexa_udon/protocol/result.hpp",
-      "sha256": "5bc8877cf9dab46577089f110bb919e94f364231e4314fa6365c605335a2a8d9"
+      "sha256": "a255a34996106f98e2a2456921a7abaee82b706cde55bf39ab5c5fdca85ff6e7"
     },
     {
       "path": "include/hexa_udon/session/persistence.hpp",
@@ -153,15 +153,15 @@
     },
     {
       "path": "src/app/auto_client.cpp",
-      "sha256": "05235af88780a6f20108607818463461136731f74009aebf99d7ef970810db4e"
+      "sha256": "bd4df14aed813bcf5c5fd6cf82b7e35d999fcd3576c7227a1f4d068172085c91"
     },
     {
       "path": "src/app/lan_worker.cpp",
-      "sha256": "fae1fd3565f605cb71db44c950bc255a3c9f082ec12271c67ec81db4a4fc3444"
+      "sha256": "4a697d1fefd379fa32dc38900671227a2205766a9c5ea894b286c20d834634a1"
     },
     {
       "path": "src/app/main.cpp",
-      "sha256": "fb3c155557549b5b20d7f48d89cd1646253231f3f3a820978042c2004d4bd825"
+      "sha256": "568db731e6ce9e288126c7171678a9f4ee55db7273c3ef7e63fad1599fd785dd"
     },
     {
       "path": "src/app/production_profile.cpp",
@@ -189,11 +189,11 @@
     },
     {
       "path": "src/optimizer/daily_deadline_policy.cpp",
-      "sha256": "fa995d06ae6fbc95509b9bb3ff414351395ad377069612ce106167aa48291f5f"
+      "sha256": "670361d388c70f1c69f99171c09363cc44a5d9dc670cfe6d9473fac73f1d833d"
     },
     {
       "path": "src/optimizer/optimizer.cpp",
-      "sha256": "a6928c52531f425c27dd38d4591a282aa3fcef9a7959b69935d99a25b9dffad4"
+      "sha256": "d94cfa69308129bb785f19abc6bd7ced61eeffe7b76eb18883557ffafb545033"
     },
     {
       "path": "src/pathfinding/important_point_routes.cpp",
@@ -217,7 +217,7 @@
     },
     {
       "path": "src/protocol/api_client.cpp",
-      "sha256": "cd10753e81d4ad6b2088810686c06b332db134e8bd9281e5ccdeb432c01b9553"
+      "sha256": "ecc3087d129d1c5cc0e73b1d226fd4488b5b4d79f5f126d429786c2258604af0"
     },
     {
       "path": "src/protocol/http_transport.cpp",
@@ -229,7 +229,7 @@
     },
     {
       "path": "src/protocol/request_control.cpp",
-      "sha256": "4faff873d0bc88592c04cd652c50b201518a59f37cd5cef7f8bce9b8dc3616f1"
+      "sha256": "afe8cc1a60ba6eb598a7d5868251fc01e81538ca678d5b25f5a2573371d36892"
     },
     {
       "path": "src/session/persistence.cpp",
@@ -237,11 +237,11 @@
     },
     {
       "path": "src/session/polling.cpp",
-      "sha256": "90c2e564d114e78244cf1b0bafffea41733ea87fa56f7234e9bf7e22635ac47e"
+      "sha256": "b8f0af4af0922511b3d578a83194b2b4feb49262446cf6fa5bdc566204c44079"
     },
     {
       "path": "src/session/session.cpp",
-      "sha256": "4f467b9b407a663ea7da591caf1e1af00d671d59e53c1941c6c031ca997f9eee"
+      "sha256": "4b216e363acece9b1b7369d0bed2826404158864a3f0b7b87c9c88c1d2ac5d2e"
     },
     {
       "path": "src/simulator/action.cpp",

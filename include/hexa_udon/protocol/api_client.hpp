@@ -26,7 +26,8 @@ public:
 
     [[nodiscard]] Result<core::MatchConfig> get_setting(
         std::optional<SteadyTime> deadline = std::nullopt,
-        const std::string& phase = "pre-match-setting");
+        const std::string& phase = "pre-match-setting",
+        std::size_t attempt = 1);
     [[nodiscard]] Result<bool> post_agent_kinds(
         const std::vector<core::AgentKind>& kinds,
         std::optional<SteadyTime> deadline = std::nullopt,
@@ -34,22 +35,27 @@ public:
     [[nodiscard]] Result<core::DailyState> get_state(
         const core::MatchConfig& config,
         std::optional<SteadyTime> deadline = std::nullopt,
-        const std::string& phase = "daily-state");
+        const std::string& phase = "daily-state",
+        std::size_t attempt = 1);
     [[nodiscard]] Result<std::int32_t> post_actions(
         const simulator::DayActionPlan& plan,
         std::optional<SteadyTime> deadline = std::nullopt,
-        const std::string& phase = "daily-submit");
+        const std::string& phase = "daily-submit",
+        std::optional<std::uint64_t> local_submission_id = std::nullopt);
 
 private:
     [[nodiscard]] Result<HttpResponse> request(
         HttpMethod method, const std::string& path, const std::string& body = {},
         std::optional<SteadyTime> deadline = std::nullopt,
-        const std::string& phase = "");
+        const std::string& phase = "",
+        std::optional<std::uint64_t> local_submission_id = std::nullopt,
+        std::size_t attempt = 1);
     [[nodiscard]] Error http_error(const HttpResponse& response) const;
     [[nodiscard]] Error redact(Error error) const;
     void log_post_response(const std::string& path, const HttpResponse& response,
                            const std::string& phase, std::optional<bool> attempted,
-                           const std::string& result) noexcept;
+                           const std::string& result,
+                           std::optional<std::uint64_t> local_submission_id) noexcept;
 
     HttpTransport& transport_;
     ApiConfig config_;

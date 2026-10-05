@@ -193,7 +193,8 @@ using OptimizerClock = std::function<std::chrono::steady_clock::time_point()>;
 [[nodiscard]] bool apply_neighborhood(
     StructuredSolution& solution, Neighborhood neighborhood,
     const planner::PlannerInput& input, std::mt19937_64& random,
-    std::string* mutation_kind = nullptr);
+    std::string* mutation_kind = nullptr,
+    std::string* fallback_reason = nullptr);
 
 [[nodiscard]] OptimizerOutcome optimize(
     const planner::PlannerInput& input,

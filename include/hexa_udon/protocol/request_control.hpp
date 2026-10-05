@@ -27,6 +27,8 @@ public:
         SleepUntil sleep_until = [](SteadyTime time) { std::this_thread::sleep_until(time); });
 
     [[nodiscard]] Result<bool> acquire(std::optional<SteadyTime> deadline = std::nullopt);
+    // Re-check the injected monotonic clock immediately before transport starts.
+    [[nodiscard]] Result<bool> check_deadline(std::optional<SteadyTime> deadline = std::nullopt);
 
 private:
     std::chrono::milliseconds minimum_interval_;
@@ -57,9 +59,13 @@ struct OperationLogEntry {
     std::string next_retry_utc;
     std::string backoff_reason;
     std::optional<std::int64_t> retry_after_ms;
+    // Safe relative wait until the next poll; never contains a URL or response body.
+    std::optional<std::int64_t> retry_wait_ms;
     std::optional<std::int64_t> deadline_remaining_ms;
     std::string stop_reason;
     std::string response_classification;
+    // Identifies the originating logical operation for local safe-stop records.
+    std::string source_operation;
     std::optional<bool> submission_attempted;
 };
 
@@ -67,11 +73,13 @@ class OperationLogger {
 public:
     virtual ~OperationLogger() = default;
     virtual void write(const OperationLogEntry& entry) noexcept = 0;
+    virtual void update(const OperationLogEntry& entry) noexcept { write(entry); }
 };
 
 class NullOperationLogger final : public OperationLogger {
 public:
     void write(const OperationLogEntry&) noexcept override {}
+    void update(const OperationLogEntry&) noexcept override {}
 };
 
 class FileOperationLogger final : public OperationLogger {
@@ -80,6 +88,7 @@ public:
         std::filesystem::path path,
         OperationLogEntry::Level minimum_level = OperationLogEntry::Level::Info);
     void write(const OperationLogEntry& entry) noexcept override;
+    void update(const OperationLogEntry& entry) noexcept override;
 
 private:
     std::filesystem::path path_;

@@ -42,11 +42,15 @@ Day1+のoffline研究snapshot、Catalog、実験結果はproduction pathに存�
 
 当日の`endsAt`から10秒を差し引いた時刻を`hardPlanningDeadline`としてmonotonic clockへ変換します。baseline Greedy/Refuel、worker、Optimizer、strict Simulatorはこの共有deadlineを使い、最後の10秒を通信・提出余裕として残します。policyの`reserveMs`は改善開始可否・診断・fallback判定だけに使い、共有deadlineから二重に差し引きません。profileの内部100/150ms値と日次wall-clock上限は別契約です。baseline最大枠は待機時間ではなく、早く完了すれば直ちにstrict Simulator検証へ進みます。
 
-32×32もbaselineを最優先し最大5秒枠で構築します。strict検証済みbaselineがある場合だけ、reserve後に最低250msの探索余剰があれば改善を開始します。改善deadlineも`min(上表の上限, baseline完了後の実残時間−reserve)`です。30秒を必ず使い切る設計ではありません。
+GET の再試行は実際の試行番号を `attempt` に記録し、`Retry-After`（記録できる場合）、安全な相対待機時間 `retryWaitMs`、`backoffReason` を保存します。HTTP本文、host、token、secretは保存しません。403/Retry-After、bounded backoff、deadline超過、polling limitは `responseClassification` と `result` で区別します。
+
+32×32もbaselineを最優先し最大5秒枠で構築します。strict検証済みbaselineがある場合だけ、残り時間がminimum improvement guardを満たせば改善を開始します。改善deadlineは`min(上表の上限, baseline完了後のhardPlanningDeadlineまでの実残時間)`で、reserveを停止時刻から差し引きません。30秒を必ず使い切る設計ではありません。
 
 OfficialScore辞書順の厳密改善、または3項目完全同点でDailyReadiness厳密改善の場合だけ採用します。Optimizer deadline/失敗、候補Simulator失敗、低scoreは同日検証済みbaselineを`baseline-retained`として保持します。baseline失敗、期限切れ、reserve到達では安全停止し、Wait fallback・前日plan・synthetic successを作りません。deadline確認は協調的であり、OS停止や未知の通信遅延を含む時間内完走を保証しません。
 
 Session/logにpolicy/profile identity、configured上限とclamp後stage上限、開始・baseline完了・改善後の残時間、採否と失敗理由を記録します。`finalRemainingMs`は計画終了時の値で、開始残時間ではありません。
+
+責務境界: daily deadline policyはbaseline、worker、Optimizerの実行順、共有hardPlanningDeadline、timeout/budgetのclamp、fallback候補とstrict検証済み候補の返却だけを担当します。worker候補のclaim再検証、strict Simulator結果の確認、baselineとのOfficialScore比較、同点時のDailyReadiness比較、最終採用またはbaseline-retainedはApp層が担当します。policyの`workerCandidateReturned`は「App審査へ返却」の意味であり、最終採用を意味しません。
 
 ## 参考コマンド（今回実行しない）
 
