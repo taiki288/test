@@ -29,6 +29,8 @@ struct LanWorkerReply {
     bool success = false;
     nlohmann::json payload;
     std::string error;
+    // Safe diagnostic classification; never contains request data or secrets.
+    std::string failure_classification;
 };
 
 [[nodiscard]] std::optional<LanWorkerEndpoint> parse_lan_worker_endpoint(
@@ -48,6 +50,14 @@ struct LanWorkerReply {
 [[nodiscard]] std::chrono::milliseconds remaining_worker_timeout(
     std::chrono::steady_clock::time_point deadline,
     std::chrono::steady_clock::time_point now) noexcept;
+
+[[nodiscard]] std::chrono::steady_clock::time_point worker_reply_deadline(
+    std::chrono::steady_clock::time_point planning_started,
+    std::chrono::milliseconds worker_budget,
+    std::chrono::milliseconds reply_grace = std::chrono::milliseconds{100}) noexcept;
+
+[[nodiscard]] std::string classify_worker_failure(
+    const std::string& error, bool deadline_reached) ;
 
 int run_lan_worker(const LanWorkerConfig& config,
                    const std::function<bool()>& stop_requested,
