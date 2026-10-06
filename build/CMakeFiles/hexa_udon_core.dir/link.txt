@@ -1,0 +1,2 @@
+/usr/bin/ar qc libhexa_udon_core.a CMakeFiles/hexa_udon_core.dir/src/core/map_definition.cpp.o CMakeFiles/hexa_udon_core.dir/src/core/model_validation.cpp.o CMakeFiles/hexa_udon_core.dir/src/core/types.cpp.o CMakeFiles/hexa_udon_core.dir/src/core/type_candidates.cpp.o
+/usr/bin/ranlib libhexa_udon_core.a

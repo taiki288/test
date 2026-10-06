@@ -20,10 +20,34 @@ namespace {
 
 bool retryable(protocol::ErrorCode code) {
     using protocol::ErrorCode;
-    return code == ErrorCode::AccessTime || code == ErrorCode::Http5xx ||
+    return code == ErrorCode::AccessTime || code == ErrorCode::Http429 || code == ErrorCode::Http5xx ||
            code == ErrorCode::DnsFailure || code == ErrorCode::ConnectionRefused ||
            code == ErrorCode::ConnectionTimeout || code == ErrorCode::TransferTimeout ||
            code == ErrorCode::Disconnected;
+}
+
+std::string safe_poll_classification(protocol::ErrorCode code) {
+    using protocol::ErrorCode;
+    if (code == ErrorCode::AccessTime) return "rate-limited-or-not-ready";
+    if (code == ErrorCode::Http429) return "http-429-rate-limited";
+    if (code == ErrorCode::Http5xx) return "server-error";
+    if (code == ErrorCode::DeadlineExceeded) return "deadline-exceeded";
+    if (code == ErrorCode::DnsFailure || code == ErrorCode::ConnectionRefused ||
+        code == ErrorCode::ConnectionTimeout || code == ErrorCode::TransferTimeout ||
+        code == ErrorCode::Disconnected) return "transport-error";
+    return "poll-error";
+}
+
+std::chrono::milliseconds poll_wait_for(const protocol::Error& error,
+                                        std::chrono::milliseconds backoff,
+                                        std::chrono::milliseconds minimum_interval) {
+    if (error.retry_after_ms && *error.retry_after_ms > 0) {
+        return std::chrono::milliseconds{*error.retry_after_ms};
+    }
+    if (error.retry_after_ms && *error.retry_after_ms == 0) {
+        return std::max(std::chrono::milliseconds{1}, minimum_interval);
+    }
+    return std::max(std::chrono::milliseconds{1}, backoff);
 }
 
 std::chrono::system_clock::time_point unix_time(core::UnixTimestamp value) {
@@ -216,14 +240,76 @@ AutoCompetitionClient::AutoCompetitionClient(
       stop_requested_(std::move(stop_requested)), output_(output),
       logger_(logger == nullptr ? &null_logger_ : logger), deadline_stages_(deadline_stages) {}
 
-protocol::Result<core::MatchConfig> AutoCompetitionClient::fetch_setting() {
-    auto backoff = std::chrono::milliseconds{500};
+protocol::Result<core::MatchConfig> AutoCompetitionClient::fetch_setting(
+    const std::string& phase, std::optional<protocol::SteadyTime> deadline) {
+    const auto configured_interval = std::max(std::chrono::milliseconds{1}, config_.polling_interval);
+    auto backoff = configured_interval;
     std::size_t failures = 0;
+    std::size_t attempt = 0;
     while (!stop_requested_()) {
-        auto result = api_.get_setting();
+        ++attempt;
+        auto result = api_.get_setting(deadline, phase, attempt);
         if (result) return result;
-        if (!retryable(result.error().code) || ++failures >= config_.maximum_get_attempts) return result;
-        clock_.wait_until(clock_.now() + backoff);
+        if (!retryable(result.error().code)) return result;
+        ++failures;
+        const auto wait_duration = poll_wait_for(result.error(), backoff, configured_interval);
+        const auto target = clock_.now() + wait_duration;
+        if (deadline && target > *deadline) {
+            protocol::OperationLogEntry entry;
+            entry.level = protocol::OperationLogEntry::Level::Warning;
+            entry.timestamp_utc = protocol::utc_timestamp();
+            entry.operation = "setting";
+            entry.method = "GET";
+            entry.path = "/setting";
+            entry.endpoint = "/setting";
+            entry.phase = phase;
+            entry.attempt = attempt;
+            entry.result = "deadline-stop";
+            entry.response_classification = "deadline-exceeded";
+            entry.backoff_reason = "retry-would-exceed-deadline";
+            entry.retry_after_ms = result.error().retry_after_ms;
+            entry.retry_wait_ms = wait_duration.count();
+            entry.deadline_remaining_ms = std::max<std::int64_t>(0,
+                std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - clock_.now()).count());
+            logger_->write(entry);
+            return protocol::Result<core::MatchConfig>::failure(
+                {protocol::ErrorCode::DeadlineExceeded, "setting retry exceeds deadline"});
+        }
+        if (failures >= config_.maximum_get_attempts) {
+            protocol::OperationLogEntry entry;
+            entry.level = protocol::OperationLogEntry::Level::Warning;
+            entry.timestamp_utc = protocol::utc_timestamp();
+            entry.operation = "setting";
+            entry.method = "GET";
+            entry.path = "/setting";
+            entry.endpoint = "/setting";
+            entry.phase = phase;
+            entry.attempt = attempt;
+            entry.result = "polling-limit";
+            entry.response_classification = "polling-limit";
+            entry.backoff_reason = "maximum-attempts-reached";
+            entry.retry_after_ms = result.error().retry_after_ms;
+            entry.retry_wait_ms = wait_duration.count();
+            logger_->write(entry);
+            return result;
+        }
+        protocol::OperationLogEntry entry;
+        entry.timestamp_utc = protocol::utc_timestamp();
+        entry.operation = "setting";
+        entry.method = "GET";
+        entry.path = "/setting";
+        entry.endpoint = "/setting";
+        entry.phase = phase;
+        entry.attempt = attempt;
+        entry.result = "retry-scheduled";
+        entry.response_classification = safe_poll_classification(result.error().code);
+        entry.backoff_reason = result.error().retry_after_ms ? "retry-after" : "bounded-exponential-backoff";
+        entry.retry_after_ms = result.error().retry_after_ms;
+        entry.retry_wait_ms = wait_duration.count();
+        if (deadline) entry.deadline_remaining_ms = std::max<std::int64_t>(0,
+            std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - clock_.now()).count());
+        logger_->write(entry);
+        clock_.wait_until(target);
         backoff = std::min(backoff * 2, std::chrono::milliseconds{4000});
     }
     return protocol::Result<core::MatchConfig>::failure(
@@ -233,29 +319,117 @@ protocol::Result<core::MatchConfig> AutoCompetitionClient::fetch_setting() {
 protocol::Result<core::DailyState> AutoCompetitionClient::fetch_state(
     const core::MatchConfig& config, std::optional<core::Quantity> current_day,
     std::chrono::system_clock::time_point wall_deadline) {
-    auto backoff = std::chrono::milliseconds{500};
+    const auto configured_interval = std::max(std::chrono::milliseconds{1}, config_.polling_interval);
+    auto backoff = configured_interval;
     std::size_t failures = 0;
+    std::size_t attempt = 0;
     while (!stop_requested_() && clock_.wall_now() < wall_deadline) {
-        auto result = api_.get_state(config);
+        ++attempt;
+        const auto wall_remaining = wall_deadline - clock_.wall_now();
+        const auto request_deadline = clock_.now() +
+            std::chrono::duration_cast<protocol::SteadyTime::duration>(wall_remaining);
+        auto result = api_.get_state(config, request_deadline, "daily-state", attempt);
         if (result) {
             failures = 0;
-            backoff = std::chrono::milliseconds{500};
+            backoff = configured_interval;
             if (!current_day || result.value().day > *current_day) return result;
             if (result.value().day < *current_day) {
                 return protocol::Result<core::DailyState>::failure(
                     {protocol::ErrorCode::Conflict, "server day moved backwards"});
             }
-            clock_.wait_until(clock_.now() + config_.polling_interval);
+            const auto target = clock_.now() + backoff;
+            if (target > request_deadline || clock_.wall_now() + backoff > wall_deadline) {
+                protocol::OperationLogEntry entry;
+                entry.level = protocol::OperationLogEntry::Level::Warning;
+                entry.timestamp_utc = protocol::utc_timestamp();
+                entry.operation = "daily-state";
+                entry.method = "GET";
+                entry.path = "/";
+                entry.endpoint = "/";
+                entry.phase = "daily-state";
+                entry.attempt = attempt;
+                entry.result = "deadline-stop";
+                entry.response_classification = "deadline-exceeded";
+                entry.backoff_reason = "polling-next-state-would-exceed-deadline";
+                entry.retry_wait_ms = backoff.count();
+                logger_->write(entry);
+                break;
+            }
+            protocol::OperationLogEntry entry;
+            entry.timestamp_utc = protocol::utc_timestamp();
+            entry.operation = "daily-state";
+            entry.method = "GET";
+            entry.path = "/";
+            entry.endpoint = "/";
+            entry.phase = "daily-state";
+            entry.attempt = attempt;
+            entry.result = "retry-scheduled";
+            entry.response_classification = "state-not-ready";
+            entry.backoff_reason = "bounded-exponential-backoff";
+            entry.retry_wait_ms = backoff.count();
+            logger_->write(entry);
+            clock_.wait_until(target);
+            backoff = std::min(backoff * 2, std::chrono::milliseconds{4000});
             continue;
         }
         if (result.error().code == protocol::ErrorCode::Auth || !retryable(result.error().code)) {
             return result;
         }
-        if (result.error().code != protocol::ErrorCode::AccessTime &&
-            ++failures >= config_.maximum_get_attempts) {
+        ++failures;
+        const auto wait_duration = poll_wait_for(result.error(), backoff, configured_interval);
+        const auto target = clock_.now() + wait_duration;
+        if (clock_.now() + wait_duration > request_deadline ||
+            clock_.wall_now() + wait_duration > wall_deadline) {
+            protocol::OperationLogEntry entry;
+            entry.level = protocol::OperationLogEntry::Level::Warning;
+            entry.timestamp_utc = protocol::utc_timestamp();
+            entry.operation = "daily-state";
+            entry.method = "GET";
+            entry.path = "/";
+            entry.endpoint = "/";
+            entry.phase = "daily-state";
+            entry.attempt = attempt;
+            entry.result = "deadline-stop";
+            entry.response_classification = "deadline-exceeded";
+            entry.backoff_reason = "retry-would-exceed-deadline";
+            entry.retry_after_ms = result.error().retry_after_ms;
+            entry.retry_wait_ms = wait_duration.count();
+            logger_->write(entry);
+            break;
+        }
+        if (failures >= config_.maximum_get_attempts) {
+            protocol::OperationLogEntry entry;
+            entry.level = protocol::OperationLogEntry::Level::Warning;
+            entry.timestamp_utc = protocol::utc_timestamp();
+            entry.operation = "daily-state";
+            entry.method = "GET";
+            entry.path = "/";
+            entry.endpoint = "/";
+            entry.phase = "daily-state";
+            entry.attempt = attempt;
+            entry.result = "polling-limit";
+            entry.response_classification = "polling-limit";
+            entry.backoff_reason = "maximum-attempts-reached";
+            entry.retry_after_ms = result.error().retry_after_ms;
+            entry.retry_wait_ms = wait_duration.count();
+            logger_->write(entry);
             return result;
         }
-        clock_.wait_until(clock_.now() + backoff);
+        protocol::OperationLogEntry entry;
+        entry.timestamp_utc = protocol::utc_timestamp();
+        entry.operation = "daily-state";
+        entry.method = "GET";
+        entry.path = "/";
+        entry.endpoint = "/";
+        entry.phase = "daily-state";
+        entry.attempt = attempt;
+        entry.result = "retry-scheduled";
+        entry.response_classification = safe_poll_classification(result.error().code);
+        entry.backoff_reason = result.error().retry_after_ms ? "retry-after" : "bounded-exponential-backoff";
+        entry.retry_after_ms = result.error().retry_after_ms;
+        entry.retry_wait_ms = wait_duration.count();
+        logger_->write(entry);
+        clock_.wait_until(target);
         backoff = std::min(backoff * 2, std::chrono::milliseconds{4000});
     }
     return protocol::Result<core::DailyState>::failure(
@@ -265,7 +439,10 @@ protocol::Result<core::DailyState> AutoCompetitionClient::fetch_state(
 bool AutoCompetitionClient::has_unknown_submission(const session::SessionSnapshot& snapshot) const {
     return snapshot.agent_kinds_unknown ||
            std::any_of(snapshot.submissions.begin(), snapshot.submissions.end(), [](const auto& item) {
-        return item.classification == session::SubmissionClassification::UnknownResponse;
+        // Recovery is keyed to the persisted tri-state outcome, not to a
+        // legacy classification name. A null value means POST started but its
+        // outcome is not safely known.
+        return !item.submission_attempted.has_value();
            });
 }
 
@@ -286,7 +463,7 @@ void AutoCompetitionClient::print_day_summary(
     output_ << "day=" << daily.day << '/' << config.day_steps.size() - 1
             << " endsAt=" << daily.ends_at << " remainingSeconds=" << std::max<std::int64_t>(0, remaining)
             << " safetyMarginSeconds=" << config_.safety_margin.count() << '\n'
-            << "actions=" << record.action_json << " localId=" << record.local_id;
+            << "actions=omitted localId=" << record.local_id;
     if (record.revision) output_ << " revision=" << *record.revision;
     output_ << " predictedBrands=" << record.simulation.brands.size()
             << " predictedBalls=" << record.simulation.total_balls
@@ -330,7 +507,7 @@ RunResult AutoCompetitionClient::run() {
         lock = acquired.take();
     }
 
-    auto setting = fetch_setting();
+    auto setting = fetch_setting("registration");
     if (!setting) return {stop_requested_() ? RunStatus::Stopped : RunStatus::Failed,
                           setting.error().message};
     output_ << "session=setting-received startsAt=" << setting.value().starts_at << '\n';
@@ -393,6 +570,15 @@ RunResult AutoCompetitionClient::run() {
         auto restored = initial.restore(state_path);
         if (!restored) return {RunStatus::RecoveryRequired, restored.error().message};
         if (has_unknown_submission(initial.snapshot())) {
+            protocol::OperationLogEntry recovery_log;
+            recovery_log.level = protocol::OperationLogEntry::Level::Warning;
+            recovery_log.timestamp_utc = protocol::utc_timestamp();
+            recovery_log.operation = "recovery-required";
+            recovery_log.phase = "recovery";
+            recovery_log.result = "saved POST outcome is unknown";
+            recovery_log.response_classification = "unknown-post-outcome";
+            recovery_log.submission_attempted = std::nullopt;
+            logger_->write(recovery_log);
             return {RunStatus::RecoveryRequired, "saved session contains an unknown POST outcome"};
         }
     }
@@ -656,7 +842,7 @@ RunResult AutoCompetitionClient::run() {
         if (!submitted) {
             const auto saved_failure = initial.save(state_path);
             if (!saved_failure) return {RunStatus::Failed, saved_failure.error().message};
-            return {submitted.error().code == protocol::ErrorCode::UnknownResponse
+            return {!submitted.error().submission_attempted.has_value()
                         ? RunStatus::RecoveryRequired : RunStatus::Failed,
                     submitted.error().message};
         }
@@ -664,25 +850,15 @@ RunResult AutoCompetitionClient::run() {
         if (!saved) return {RunStatus::Failed, saved.error().message};
         output_ << "session=agent-types-submitted\n";
     } else if (config_.mode == RunMode::DryRun) {
-        output_ << "session=agent-types-dry-run body=";
-        auto encoded = protocol::encode_agent_kinds(selected_kinds);
-        output_ << (encoded ? encoded.value() : "<invalid>") << '\n';
+        output_ << "session=agent-types-dry-run body=omitted\n";
         if (config_.type_selector == TypeSelectorMode::Prematch
             && !(config_.profile_version == 2 && initial.snapshot().submitted_agent_kinds))
             return {RunStatus::Completed, "prematch type-selector dry-run completed without POST"};
     }
 
-    if (setting.value().starts_at == 0) {
-        const auto start_deadline = clock_.now() + std::chrono::minutes{10};
-        while (setting.value().starts_at == 0 && !stop_requested_() && clock_.now() < start_deadline) {
-            clock_.wait_until(clock_.now() + config_.polling_interval);
-            auto refreshed = fetch_setting();
-            if (!refreshed) return {RunStatus::Failed, refreshed.error().message};
-            setting = std::move(refreshed);
-        }
-        if (stop_requested_()) return {RunStatus::Stopped, "stop requested"};
-        if (setting.value().starts_at == 0) return {RunStatus::Failed, "match start was not fixed before timeout"};
-    }
+    // Once type registration is complete, wait for the first daily state on GET /
+    // instead of re-fetching the already accepted match setting. fetch_state()
+    // owns the 403/Retry-After/backoff/deadline policy for this phase.
     output_ << "session=waiting-for-match startsAt=" << setting.value().starts_at << '\n';
 
     session::SessionController competition(api_, setting.value(), nullptr, logger_);
@@ -741,7 +917,9 @@ RunResult AutoCompetitionClient::run() {
     }
     const auto total_days = static_cast<core::Quantity>(setting.value().day_steps.size());
     const auto log_daily_failure = [&](const core::Quantity day, const std::string& phase,
-                                       const std::string& reason) {
+                                       const std::string& reason,
+                                       std::optional<bool> submission_attempted = std::optional<bool>{false},
+                                       const std::string& source_operation = "daily-replan") {
         std::string safe_reason = reason;
         for (auto& character : safe_reason) {
             if (character == '\n' || character == '\r') character = ' ';
@@ -756,6 +934,12 @@ RunResult AutoCompetitionClient::run() {
         entry.day = day;
         entry.result = "termination=" + phase + ";failureReason=" + safe_reason;
         entry.state_transition = "safe-stop-no-plan-post";
+        entry.endpoint = "/";
+        entry.phase = "daily-submit";
+        entry.stop_reason = phase + ":" + safe_reason;
+        entry.response_classification = "safe-stop";
+        entry.source_operation = source_operation;
+        entry.submission_attempted = submission_attempted;
         logger_->write(entry);
     };
 
@@ -830,153 +1014,326 @@ RunResult AutoCompetitionClient::run() {
                 if (!policy) return {RunStatus::Failed, "unsupported daily deadline policy size"};
                 auto observed_deadline = optimizer::observed_daily_deadline(
                     daily.value().ends_at, clock_.wall_now(), clock_.now());
+                constexpr auto planning_safety_reserve = std::chrono::seconds{10};
                 const auto extra_reserve = std::max(std::chrono::milliseconds{0},
-                    std::chrono::duration_cast<std::chrono::milliseconds>(config_.safety_margin) - policy->reserve);
-                if (observed_deadline) *observed_deadline -= extra_reserve;
+                    std::chrono::duration_cast<std::chrono::milliseconds>(planning_safety_reserve) - policy->reserve);
+                if (observed_deadline) *observed_deadline -= planning_safety_reserve;
                 optimizer::OptimizerConfig improvement_config;
                 improvement_config.seed = config_.planner_seed;
                 improvement_config.maximum_iterations = config_.optimizer_iterations;
                 improvement_config.initial_temperature = config_.optimizer_initial_temperature;
                 improvement_config.final_temperature = config_.optimizer_final_temperature;
+                auto daily_stages = deadline_stages_ ? *deadline_stages_ : optimizer::DailyDeadlineStages{};
+                if (!config_.lan_workers.empty()) {
+                    daily_stages.worker = [&](const planner::PlannerInput& worker_input,
+                        const planner::PlannerResult&, const planner::RefuelPlannerResult& baseline_refuel,
+                        const simulator::DaySimulationResult& baseline_sim,
+                        protocol::SteadyTime hard_deadline, std::chrono::milliseconds effective_timeout,
+                        optimizer::OptimizerClock worker_now) {
+                        static_cast<void>(worker_input);
+                        optimizer::DailyDeadlineStages::WorkerResult result;
+                        result.reason = "worker-unavailable";
+                        result.record["requested"] = true;
+                        result.record["workerCount"] = config_.lan_workers.size();
+                        result.record["workerEffectiveTimeoutMs"] = effective_timeout.count();
+                        result.record["fallback"] = "baseline-retained";
+                        const auto started = worker_now();
+                        const auto previous = config_.mode == RunMode::DryRun ? policy_dry_progress : competition.progress();
+                        const auto baseline_score = planner::official_score(previous, baseline_sim);
+                        const auto baseline_readiness = planner::daily_readiness(
+                            setting.value(), daily.value(), baseline_sim, baseline_refuel.visited_spots);
+                        struct VerifiedWorkerCandidate {
+                            simulator::DayActionPlan plan;
+                            simulator::DaySimulationResult simulation;
+                            planner::OfficialScore score;
+                            planner::DailyReadiness readiness;
+                            std::string action_hash;
+                            std::string plan_hash;
+                            std::string end_state_hash;
+                            std::size_t worker_index = 0;
+                        };
+                        std::optional<VerifiedWorkerCandidate> best_candidate;
+                        bool worker_claim_mismatch = false;
+                        const auto same_readiness = [](const planner::DailyReadiness& left,
+                                                        const planner::DailyReadiness& right) {
+                            return left.uncollected_spot_reachability == right.uncollected_spot_reachability
+                                && left.fuel_reserve == right.fuel_reserve
+                                && left.patrol_dispersion == right.patrol_dispersion
+                                && left.rendezvous_readiness == right.rendezvous_readiness
+                                && left.deterministic_order == right.deterministic_order;
+                        };
+                        nlohmann::json request = {
+                            {"requestId", daily_snapshot_identity(setting.value(), daily.value())},
+                            {"evaluatorVersion", "daily-improvement-candidate-v1"},
+                            {"day", daily.value().day}, {"size", setting.value().map.height()},
+                            {"agentCount", daily.value().own_agents.size()},
+                            {"typeIdentity", type_identity(selected_kinds)},
+                            {"snapshotIdentity", daily_snapshot_identity(setting.value(), daily.value())},
+                            {"mapIdentity", map_identity_digest(setting.value().map)},
+                            {"stateIdentity", agent_state_identity(daily.value())},
+                            {"policyIdentity", config_.production_policy_identity},
+                            {"workerBudgetMs", effective_timeout.count()},
+                            {"futureSnapshotRead", false}, {"lookahead", 0}};
+                        request["plannerInput"] = canonical_planner_input(
+                            setting.value(), daily.value(), previous, selected_kinds,
+                            config_.planner_seed, effective_timeout.count());
+                        request["payloadHash"] = canonical_json_hash(request["plannerInput"]);
+                        const char* secret = std::getenv(config_.lan_worker_secret_environment.c_str());
+                        if (secret == nullptr || *secret == '\0') return result;
+                        nlohmann::json worker_observations = nlohmann::json::array();
+                        for (std::size_t worker_index = 0; worker_index < config_.lan_workers.size(); ++worker_index) {
+                            auto worker_request = request;
+                            worker_request["workerIndex"] = worker_index;
+                            worker_request["workerCount"] = config_.lan_workers.size();
+                            const auto worker_seed = config_.planner_seed + static_cast<std::uint64_t>(worker_index);
+                            worker_request["plannerInput"]["plannerSeed"] = worker_seed;
+                            worker_request["payloadHash"] = canonical_json_hash(worker_request["plannerInput"]);
+                            const auto& endpoint = config_.lan_workers[worker_index];
+                            const auto endpoint_digest = stable_hash(endpoint.host + ":" + std::to_string(endpoint.port));
+                            result.record["workerEndpointDigest"] = endpoint_digest;
+                            result.record["workerIndex"] = worker_index;
+                            result.record["workerSeed"] = worker_seed;
+                            const auto worker_started = worker_now();
+                            std::string observation_termination = "timeout";
+                            std::string observation_claim = "timeout";
+                            std::string observation_adoption = "baseline-retained";
+                            struct WorkerLogGuard {
+                                std::function<void()> emit;
+                                ~WorkerLogGuard() { emit(); }
+                            } worker_log_guard{[&] {
+                                const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(worker_now() - worker_started).count();
+                                worker_observations.push_back({
+                                    {"workerIndex", worker_index}, {"workerCount", config_.lan_workers.size()},
+                                    {"requestIdDigest", canonical_json_hash(worker_request.at("requestId"))},
+                                    {"elapsedMs", elapsed_ms}, {"termination", observation_termination},
+                                    {"claim", observation_claim}, {"adoption", observation_adoption}});
+                                output_ << "lan-worker-result workerIndex=" << worker_index
+                                        << " workerCount=" << config_.lan_workers.size()
+                                        << " requestIdDigest=" << canonical_json_hash(worker_request.at("requestId"))
+                                        << " elapsedMs=" << elapsed_ms
+                                        << " termination=" << observation_termination
+                                        << " claim=" << observation_claim
+                                        << " adoption=" << observation_adoption << '\n';
+                            }};
+                            const auto remaining = hard_deadline - worker_now();
+                            const auto reply_timeout = std::min(
+                                effective_timeout,
+                                std::chrono::duration_cast<std::chrono::milliseconds>(remaining));
+                            if (reply_timeout.count() <= 0) {
+                                result.reason = "worker-timeout";
+                                result.record["workerTermination"] = "timeout";
+                                result.record["mainRevalidationTermination"] = "deadline_exhausted";
+                                break;
+                            }
+                            const auto reply = request_lan_worker(endpoint, secret, worker_request, reply_timeout);
+                            if (!reply.success) {
+                                const auto failure_termination = reply.error.find("timeout") != std::string::npos
+                                    ? std::string{"timeout"} : std::string{"planner_failure"};
+                                result.record["workerTermination"] = failure_termination;
+                                // This is a main-PC classification of the failed
+                                // revalidation, never a copy of a worker claim.
+                                const auto main_failure_termination = worker_now() >= hard_deadline
+                                    ? std::string{"deadline_exhausted"} : failure_termination;
+                                result.record["mainRevalidationTermination"] = main_failure_termination;
+                                observation_termination = failure_termination;
+                                observation_claim = failure_termination == "timeout" ? "timeout" : "mismatch";
+                                result.reason = reply.error.empty() ? "worker-failure" : reply.error;
+                                continue;
+                            }
+                            try {
+                                const auto worker_termination = reply.payload.value("termination", "");
+                                observation_termination = worker_termination;
+                                simulator::RawDayActionPlan raw;
+                                for (const auto& row : reply.payload.at("actions")) raw.push_back(row.get<std::vector<std::int32_t>>());
+                                const auto parsed = simulator::parse_action_plan(raw);
+                                if (!parsed) { observation_claim = "mismatch"; result.reason = "candidate-action-invalid"; continue; }
+                                const simulator::DaySimulationInput sim_input{
+                                    setting.value().map, setting.value().spots, setting.value().fuel_limit,
+                                    setting.value().day_steps.at(static_cast<std::size_t>(daily.value().day)),
+                                    daily.value().own_agents, daily.value().traffic};
+                                // Do not start a new strict revalidation after the
+                                // hard deadline. A previously retained main-PC best
+                                // remains eligible only for deadline fallback.
+                                if (worker_now() >= hard_deadline) {
+                                    result.record["mainRevalidationTermination"] = best_candidate.has_value()
+                                        ? "deadline_exhausted_best_available" : "deadline_exhausted";
+                                    observation_claim = "mismatch";
+                                    result.reason = "candidate-unverified-deadline";
+                                    continue;
+                                }
+                                const auto simulation = simulator::simulate_day(sim_input, parsed.value());
+                                if (!simulation) { observation_claim = "mismatch"; result.reason = "candidate-simulator-rejected"; continue; }
+                                const bool strict_verified_before_deadline = worker_now() < hard_deadline;
+                                std::vector<std::vector<std::size_t>> visited(simulation.value().acquisitions.size());
+                                for (std::size_t i = 0; i < visited.size(); ++i) visited[i] = simulation.value().acquisitions[i].spot_indices;
+                                const auto candidate_score = planner::official_score(previous, simulation.value());
+                                const auto candidate_readiness = planner::daily_readiness(setting.value(), daily.value(), simulation.value(), visited);
+                                const auto expected_score = nlohmann::json::array({candidate_score.total_unique_brands, candidate_score.cumulative_daily_unique_brands, candidate_score.total_bowls});
+                                const auto expected_readiness = nlohmann::json::array({candidate_readiness.uncollected_spot_reachability, candidate_readiness.fuel_reserve, candidate_readiness.patrol_dispersion, candidate_readiness.rendezvous_readiness});
+                                const auto actions = reply.payload.at("actions");
+                                const auto action_hash = canonical_json_hash(actions);
+                                const auto plan_hash = canonical_json_hash({{"actions", actions}, {"types", selected_kinds}});
+                                nlohmann::json end_agents = nlohmann::json::array();
+                                for (const auto& agent : simulation.value().end_agents) end_agents.push_back({{"kind", core::to_int(agent.kind)}, {"position", agent.position.value}, {"fuel", agent.fuel}});
+                                const auto end_hash = canonical_json_hash(end_agents);
+                                nlohmann::json start_agents = nlohmann::json::array();
+                                for (const auto& agent : daily.value().own_agents) start_agents.push_back({{"kind", core::to_int(agent.kind)}, {"position", agent.position.value}, {"fuel", agent.fuel}});
+                                const auto start_hash = canonical_json_hash(start_agents);
+                                nlohmann::json mismatches = nlohmann::json::array();
+                                const auto compare = [&](const std::string& field, const nlohmann::json& expected, const nlohmann::json& actual) {
+                                    if (expected != actual) mismatches.push_back({{"field", field}, {"expectedDigest", canonical_json_hash(expected)}, {"actualDigest", canonical_json_hash(actual)}});
+                                };
+                                result.record["workerTermination"] = worker_termination;
+                                // A worker termination and its deadline-best flags are claims.
+                                // The main PC keeps two independent facts: whether its clock
+                                // has reached the hard deadline, and whether it held a strict
+                                // best candidate before that deadline.
+                                const bool score_better = planner::better_official_score(candidate_score, baseline_score);
+                                const bool readiness_better = candidate_score == baseline_score
+                                    && planner::better_daily_readiness(candidate_readiness, baseline_readiness);
+                                const bool main_best_before_deadline = best_candidate.has_value()
+                                    || (strict_verified_before_deadline && (score_better || readiness_better));
+                                const bool main_deadline_reached = worker_now() >= hard_deadline;
+                                const bool main_deadline_best = main_deadline_reached && main_best_before_deadline;
+                                const auto main_revalidation_termination = !main_deadline_reached
+                                    ? std::string{"completed"}
+                                    : main_deadline_best
+                                        ? std::string{"deadline_exhausted_best_available"}
+                                        : std::string{"deadline_exhausted"};
+                                result.record["mainRevalidationTermination"] = main_revalidation_termination;
+                                if (worker_termination != "completed"
+                                    && worker_termination != "iteration_limit"
+                                    && worker_termination != "deadline_exhausted_best_available") {
+                                    result.reason = worker_termination == "deadline_exhausted"
+                                        ? "candidate-unverified-deadline" : "candidate-termination-invalid";
+                                    observation_claim = "mismatch";
+                                    continue;
+                                }
+                                compare("requestId", worker_request.at("requestId"), reply.payload.value("requestId", nlohmann::json(nullptr)));
+                                compare("inputHash", worker_request.at("payloadHash"), reply.payload.value("inputHash", nlohmann::json(nullptr)));
+                                compare("evaluatorVersion", worker_request.at("evaluatorVersion"), reply.payload.value("evaluatorVersion", nlohmann::json(nullptr)));
+                                compare("profileIdentity", worker_request.at("policyIdentity"), reply.payload.value("policyIdentity", nlohmann::json(nullptr)));
+                                compare("mapIdentity", worker_request.at("mapIdentity"), reply.payload.value("mapIdentity", nlohmann::json(nullptr)));
+                                compare("seed", worker_request.at("plannerInput").at("plannerSeed"), reply.payload.value("plannerSeed", nlohmann::json(nullptr)));
+                                compare("workerIndex", worker_request.at("workerIndex"), reply.payload.value("workerIndex", nlohmann::json(nullptr)));
+                                compare("workerCount", worker_request.at("workerCount"), reply.payload.value("workerCount", nlohmann::json(nullptr)));
+                                compare("startStateHash", start_hash, reply.payload.value("startStateHash", nlohmann::json(nullptr)));
+                                compare("actionHash", action_hash, reply.payload.value("actionHash", nlohmann::json(nullptr)));
+                                compare("planHash", plan_hash, reply.payload.value("planHash", nlohmann::json(nullptr)));
+                                compare("endStateHash", end_hash, reply.payload.value("endStateHash", nlohmann::json(nullptr)));
+                                compare("score", expected_score, reply.payload.value("officialScore", nlohmann::json(nullptr)));
+                                compare("readiness", expected_readiness, reply.payload.value("readiness", nlohmann::json(nullptr)));
+                                compare("termination", main_revalidation_termination, worker_termination);
+                                compare("bestCandidateAtDeadline", main_deadline_best,
+                                        reply.payload.value("bestCandidateAtDeadline", nlohmann::json(nullptr)));
+                                compare("bestCandidateStrictVerified", main_deadline_best,
+                                        reply.payload.value("bestCandidateStrictVerified", nlohmann::json(nullptr)));
+                                if (!mismatches.empty()) {
+                                    observation_claim = "mismatch";
+                                    worker_claim_mismatch = true;
+                                    result.record["lanWorkerClaimDiagnostics"] = {{"workerEndpointDigest", endpoint_digest}, {"schemaVersion", reply.payload.value("protocolVersion", 0)}, {"evaluatorVersion", reply.payload.value("evaluatorVersion", "")}, {"requestIdDigest", canonical_json_hash(worker_request.at("requestId"))}, {"fields", std::move(mismatches)}, {"workerTermination", worker_termination}, {"mainRevalidationTermination", main_revalidation_termination}, {"mainRevalidationFailureReason", ""}, {"fallback", "baseline-retained"}};
+                                    result.reason = "candidate-claims-mismatch"; continue;
+                                }
+                                const bool better = score_better;
+                                const bool tie_better = readiness_better;
+                                result.record["score"] = expected_score;
+                                result.record["readiness"] = expected_readiness;
+                                result.record["actionHash"] = action_hash;
+                                result.record["planHash"] = plan_hash;
+                                result.record["endStateHash"] = end_hash;
+                                const bool candidate_better = better || tie_better;
+                                observation_claim = "accepted";
+                                observation_adoption = candidate_better ? "worker" : "baseline-retained";
+                                if (candidate_better) {
+                                    const bool deterministic_better = !best_candidate
+                                        || planner::better_official_score(candidate_score, best_candidate->score)
+                                        || (candidate_score == best_candidate->score
+                                            && planner::better_daily_readiness(candidate_readiness, best_candidate->readiness))
+                                        || (candidate_score == best_candidate->score
+                                            && same_readiness(candidate_readiness, best_candidate->readiness)
+                                            && action_hash < best_candidate->action_hash);
+                                    if (strict_verified_before_deadline && deterministic_better) {
+                                        best_candidate = VerifiedWorkerCandidate{
+                                            parsed.value(), simulation.value(), candidate_score, candidate_readiness,
+                                            action_hash, plan_hash, end_hash, worker_index};
+                                    }
+                                    result.reason = "baseline-retained-lower-or-equal-candidate";
+                                }
+                            } catch (...) { observation_claim = "mismatch"; result.reason = "candidate-response-schema-invalid"; }
+                        }
+                        result.record["workerObservations"] = std::move(worker_observations);
+                        if (worker_claim_mismatch) best_candidate.reset();
+                        if (best_candidate) {
+                            result.plan = std::move(best_candidate->plan);
+                            result.simulation = std::move(best_candidate->simulation);
+                            result.record["workerIndex"] = best_candidate->worker_index;
+                            result.record["score"] = nlohmann::json::array({
+                                best_candidate->score.total_unique_brands,
+                                best_candidate->score.cumulative_daily_unique_brands,
+                                best_candidate->score.total_bowls});
+                            result.record["readiness"] = nlohmann::json::array({
+                                best_candidate->readiness.uncollected_spot_reachability,
+                                best_candidate->readiness.fuel_reserve,
+                                best_candidate->readiness.patrol_dispersion,
+                                best_candidate->readiness.rendezvous_readiness});
+                            result.record["actionHash"] = best_candidate->action_hash;
+                            result.record["planHash"] = best_candidate->plan_hash;
+                            result.record["endStateHash"] = best_candidate->end_state_hash;
+                            result.reason = "worker-candidate-adopted";
+                        }
+                        static_cast<void>(started);
+                        result.record["accepted"] = result.plan.has_value();
+                        return result;
+                    };
+                }
+                const auto size_worker_cap = setting.value().map.height() == 16 ? std::chrono::milliseconds{5000}
+                    : setting.value().map.height() == 24 ? std::chrono::milliseconds{10000}
+                    : std::chrono::milliseconds{15000};
+                const auto configured_worker_timeout = config_.lan_worker_timeout.count() > 0
+                    ? std::min(config_.lan_worker_timeout, size_worker_cap) : size_worker_cap;
                 auto planned = optimizer::run_daily_deadline_policy(
                     {setting.value(), daily.value(), config_.mode == RunMode::DryRun ? policy_dry_progress : competition.progress()}, *policy, observed_deadline,
                     {config_.planner_candidate_limit, config_.planner_seed},
                     {config_.refuel_candidate_limit, config_.rendezvous_candidate_limit,
                      config_.maximum_refuels_per_patrol, config_.planner_seed},
-                    improvement_config, [&] { return clock_.now(); },
-                    deadline_stages_ ? *deadline_stages_ : optimizer::DailyDeadlineStages{});
+                    improvement_config, [&] { return clock_.now(); }, daily_stages, true,
+                    configured_worker_timeout);
                 planned.record["additionalSafetyReserveMs"] = extra_reserve.count();
                 planned.record["profileId"] = config_.profile_id;
                 planned.record["profileVersion"] = config_.profile_version;
                 planned.record["productionPolicyIdentity"] = config_.production_policy_identity;
                 planned.record["observedEndsAt"] = daily.value().ends_at;
+                planned.record["hardPlanningDeadline"] = daily.value().ends_at - planning_safety_reserve.count();
                 if (config_.mode == RunMode::DryRun && planned.simulation)
                     planned.record["dryRunEndAgentsHash"] = agent_state_identity(
                         core::DailyState{0, daily.value().day, planned.simulation->end_agents, {}, {}});
                 planned.record["configuredBudgets"] = {{"greedyMs",config_.planner_budget.count()},
                     {"refuelMs",config_.refuel_budget.count()}, {"optimizerMs",config_.optimizer_budget.count()}};
                 planned.record["effectiveDailyBudgets"] = {{"baselineMaxMs",policy->baseline_max.count()},
-                    {"improvementMaxMs",policy->improvement_max.count()}, {"reserveMs",policy->reserve.count()+extra_reserve.count()},
-                    {"stageContract","shared-baseline-monotonic-deadline"}};
-                if (!config_.lan_workers.empty() && planned.plan) {
-                    const char* worker_secret = std::getenv(config_.lan_worker_secret_environment.c_str());
-                    nlohmann::json worker_request = {
-                        {"requestId", daily_snapshot_identity(setting.value(), daily.value())},
-                        {"evaluatorVersion", "daily-improvement-candidate-v1"},
-                        {"day", daily.value().day},
-                        {"size", setting.value().map.height()},
-                        {"agentCount", daily.value().own_agents.size()},
-                        {"typeIdentity", type_identity(selected_kinds)},
-                        {"snapshotIdentity", daily_snapshot_identity(setting.value(), daily.value())},
-                        {"mapIdentity", daily_snapshot_identity(setting.value(), daily.value())},
-                        {"stateIdentity", agent_state_identity(daily.value())},
-                        {"policyIdentity", config_.production_policy_identity},
-                        {"workerBudgetMs", policy->improvement_max.count()},
-                        {"futureSnapshotRead", false}, {"lookahead", 0}
-                    };
-                    worker_request["startAgents"] = nlohmann::json::array();
-                    for (const auto& agent : daily.value().own_agents) {
-                        worker_request["startAgents"].push_back({
-                            {"kind", core::to_int(agent.kind)}, {"position", agent.position.value},
-                            {"fuel", agent.fuel}});
-                    }
-                    worker_request["traffic"] = nlohmann::json::array();
-                    for (const auto& road : daily.value().traffic) {
-                        worker_request["traffic"].push_back({
-                            {"position", road.position.value}, {"status", core::to_int(road.status)}});
-                    }
-                    worker_request["plannerInput"] = canonical_planner_input(
-                        setting.value(), daily.value(),
-                        config_.mode == RunMode::DryRun ? policy_dry_progress : competition.progress(),
-                        selected_kinds, config_.planner_seed, policy->improvement_max.count());
-                    worker_request["payloadHash"] = canonical_json_hash(worker_request["plannerInput"]);
-                    bool worker_accepted = false;
-                    std::string worker_reason = "worker-unavailable";
-                    if (worker_secret != nullptr && *worker_secret != '\0') {
-                        for (const auto& endpoint : config_.lan_workers) {
-                            const auto reply = request_lan_worker(endpoint, worker_secret, worker_request,
-                                                                   config_.lan_worker_timeout);
-                            if (reply.success && reply.payload.value("candidateValidated", false)
-                                && reply.payload.value("requestId", "") == worker_request.at("requestId").get<std::string>()
-                                && reply.payload.value("payloadHash", "") == worker_request.at("payloadHash").get<std::string>()) {
-                                try {
-                                    simulator::RawDayActionPlan raw;
-                                    for (const auto& row : reply.payload.at("actions"))
-                                        raw.push_back(row.get<std::vector<std::int32_t>>());
-                                    const auto parsed = simulator::parse_action_plan(raw);
-                                    if (!parsed) { worker_reason = "candidate-action-invalid"; continue; }
-                                    const auto day_steps = setting.value().day_steps.at(
-                                        static_cast<std::size_t>(daily.value().day));
-                                    const simulator::DaySimulationInput sim_input{
-                                        setting.value().map, setting.value().spots, setting.value().fuel_limit,
-                                        day_steps, daily.value().own_agents, daily.value().traffic};
-                                    const auto simulation = simulator::simulate_day(sim_input, parsed.value());
-                                    if (!simulation) { worker_reason = "candidate-simulator-rejected"; continue; }
-                                    std::vector<std::vector<std::size_t>> visited(simulation.value().acquisitions.size());
-                                    for (std::size_t index = 0; index < visited.size(); ++index)
-                                        visited[index] = simulation.value().acquisitions[index].spot_indices;
-                                    const auto score = planner::official_score(
-                                        config_.mode == RunMode::DryRun ? policy_dry_progress : competition.progress(),
-                                        simulation.value());
-                                    const auto readiness = planner::daily_readiness(
-                                        setting.value(), daily.value(), simulation.value(), visited);
-                                    nlohmann::json end_agents = nlohmann::json::array();
-                                    for (const auto& agent : simulation.value().end_agents)
-                                        end_agents.push_back({{"kind", core::to_int(agent.kind)},
-                                                              {"position", agent.position.value}, {"fuel", agent.fuel}});
-                                    const auto action_hash = canonical_json_hash(reply.payload.at("actions"));
-                                    const auto plan_hash = canonical_json_hash({{"actions", reply.payload.at("actions")},
-                                                                                {"types", selected_kinds.size()}});
-                                    const auto end_hash = canonical_json_hash(end_agents);
-                                    const auto claim_score = reply.payload.at("officialScore").get<std::vector<std::int64_t>>();
-                                    const auto claim_readiness = reply.payload.at("readiness").get<std::vector<std::int64_t>>();
-                                    const bool claims_match = claim_score == std::vector<std::int64_t>{
-                                        score.total_unique_brands, score.cumulative_daily_unique_brands, score.total_bowls}
-                                        && claim_readiness == std::vector<std::int64_t>{
-                                            readiness.uncollected_spot_reachability, readiness.fuel_reserve,
-                                            readiness.patrol_dispersion, readiness.rendezvous_readiness}
-                                        && reply.payload.value("actionHash", "") == action_hash
-                                        && reply.payload.value("planHash", "") == plan_hash
-                                        && reply.payload.value("endStateHash", "") == end_hash;
-                                    if (!claims_match) { worker_reason = "candidate-claims-mismatch"; continue; }
-                                    const auto score_values = planned.record.value("score", std::vector<std::int64_t>{0, 0, 0});
-                                    const auto readiness_values = planned.record.value("readiness", std::vector<std::int64_t>{0, 0, 0, 0});
-                                    if (score_values.size() != 3 || readiness_values.size() != 4) {
-                                        worker_reason = "baseline-claims-missing"; continue;
-                                    }
-                                    const auto baseline_score = planner::OfficialScore{
-                                        score_values[0], score_values[1], score_values[2]};
-                                    const auto baseline_readiness = planner::DailyReadiness{
-                                        readiness_values[0], readiness_values[1], readiness_values[2], readiness_values[3], {}};
-                                    const auto candidate_better = planner::better_official_score(score, baseline_score);
-                                    const auto candidate_tie_better = score == baseline_score
-                                        && planner::better_daily_readiness(readiness, baseline_readiness);
-                                    if (candidate_better || candidate_tie_better) {
-                                        planned.plan = parsed.value();
-                                        planned.simulation = simulation.value();
-                                        planned.record["lanWorkerCandidate"] = {
-                                            {"actionHash", action_hash}, {"endStateHash", end_hash},
-                                            {"adoptionReason", candidate_better ? "official-score-improved" : "readiness-tie-break"}};
-                                        worker_accepted = true;
-                                        worker_reason = "worker-candidate-adopted";
-                                    } else worker_reason = "baseline-retained-lower-or-equal-candidate";
-                                } catch (...) { worker_reason = "candidate-response-schema-invalid"; }
-                                if (worker_accepted) break;
-                            }
-                            if (!reply.error.empty()) worker_reason = reply.error;
-                        }
-                    }
-                    planned.record["lanWorker"] = {
-                        {"requested", true}, {"accepted", worker_accepted},
-                        {"fallback", !worker_accepted}, {"reason", worker_reason},
-                        {"workerCount", config_.lan_workers.size()}
-                    };
-                    if (!worker_accepted) output_ << "lan-worker baseline-retained reason=" << worker_reason << '\n';
+                    {"improvementMaxMs",policy->improvement_max.count()}, {"reserveMs",policy->reserve.count()},
+                    {"workerMaxMs", setting.value().map.height() == 16 ? 5000 : setting.value().map.height() == 24 ? 10000 : 15000},
+                    {"hardPlanningDeadline","endsAt-minus-10-seconds"},
+                    {"reserveMeaning","admission-and-fallback-guard-only"},
+                    {"stageContract","shared-baseline-worker-optimizer-monotonic-deadline"}};
+                planned.record["phase"] = "daily-submit";
+                planned.record["submissionAttempted"] = false;
+                planned.record["retryAfterMs"] = nullptr;
+                planned.record["stopReason"] = "";
+                planned.record["fallback"] = planned.plan ? "none" : "baseline-retained";
+                if (!planned.plan) {
+                    planned.record["plannedActionHash"] = nullptr;
+                    planned.record["planHash"] = nullptr;
+                    planned.record["startStateHash"] = agent_state_identity(daily.value());
+                    planned.record["stopReason"] = planned.record.value("failureReason", "planner failure");
+                    planned.record["submissionAttempted"] = false;
                 }
                 competition.record_daily_planning(planned.record);
                 output_ << "daily-deadline " << planned.record.dump() << '\n';
                 protocol::OperationLogEntry entry;
                 entry.operation = "daily-deadline-policy"; entry.day = daily.value().day;
+                entry.phase = "daily-submit";
+                entry.submission_attempted = false;
+                entry.stop_reason = planned.record.value("stopReason", "");
                 entry.result = planned.record.dump(); logger_->write(entry);
                 const auto saved = competition.save(state_path);
                 if (!saved) return {RunStatus::Failed, saved.error().message};
@@ -991,9 +1348,41 @@ RunResult AutoCompetitionClient::run() {
                     dry_metadata->next_state_identity = planned.record.at("endStateHash").get<std::string>();
                     dry_metadata->selection_reason = planned.record.at("adoptionReason").get<std::string>();
                 }
+                // observed_deadline is already hardPlanningDeadline (endsAt - 10s).
+                // Do not subtract policy.reserve again; it only gates starting improvement.
+                const auto submission_deadline = *observed_deadline;
+                if (submission_deadline <= clock_.now()) {
+                    planned.record["stopReason"] = "deadline";
+                    planned.record["fallback"] = "baseline-retained";
+                    planned.record["submissionAttempted"] = false;
+                    competition.record_daily_planning(planned.record);
+                    const auto saved_stop = competition.save(state_path);
+                    if (!saved_stop) return {RunStatus::Failed, saved_stop.error().message};
+                    log_daily_failure(daily.value().day, "deadline", "submission deadline/reserve exceeded");
+                    return {RunStatus::RecoveryRequired, "submission deadline/reserve exceeded"};
+                }
                 auto sent = competition.submit_plan(*planned.plan, config_.mode == RunMode::DryRun,
-                    *observed_deadline - policy->reserve, dry_metadata);
-                if (!sent) return {RunStatus::RecoveryRequired, sent.error().message};
+                    submission_deadline, dry_metadata);
+                if (!sent) {
+                    planned.record["stopReason"] = sent.error().message;
+                    planned.record["fallback"] = "baseline-retained";
+                    planned.record["submissionAttempted"] = sent.error().submission_attempted
+                        ? nlohmann::json(*sent.error().submission_attempted)
+                        : nlohmann::json(nullptr);
+                    planned.record["retryAfterMs"] = sent.error().retry_after_ms
+                        ? nlohmann::json(*sent.error().retry_after_ms) : nlohmann::json(nullptr);
+                    competition.record_daily_planning(planned.record);
+                    const auto saved_stop = competition.save(state_path);
+                    if (!saved_stop) return {RunStatus::Failed, saved_stop.error().message};
+                    log_daily_failure(daily.value().day, "transport-or-deadline", sent.error().message,
+                                      sent.error().submission_attempted, "daily-submit");
+                    return {!sent.error().submission_attempted.has_value()
+                                ? RunStatus::RecoveryRequired : RunStatus::Failed,
+                            sent.error().message};
+                }
+                planned.record["submissionAttempted"] = config_.mode == RunMode::DryRun
+                    ? nlohmann::json(false) : nlohmann::json(true);
+                competition.record_daily_planning(planned.record);
                 if (config_.mode == RunMode::DryRun) {
                     dry_processed.insert(daily.value().day);
                     policy_dry_progress = simulator::accumulate_progress(policy_dry_progress, *planned.simulation);
@@ -1015,12 +1404,13 @@ RunResult AutoCompetitionClient::run() {
                 config_.mode == RunMode::DryRun, deadline.stop_at);
             if (!submitted) {
                 log_daily_failure(daily.value().day, "simulation_or_transport_failure",
-                                  submitted.error().message);
+                                  submitted.error().message, submitted.error().submission_attempted,
+                                  "daily-submit");
                 if (config_.mode == RunMode::Execute) {
                     const auto saved_failure = competition.save(state_path);
                     if (!saved_failure) return {RunStatus::Failed, saved_failure.error().message};
                 }
-                return {submitted.error().code == protocol::ErrorCode::UnknownResponse
+                    return {!submitted.error().submission_attempted.has_value()
                             ? RunStatus::RecoveryRequired : RunStatus::Failed,
                         submitted.error().message};
             }
@@ -1117,7 +1507,7 @@ RunResult AutoCompetitionClient::run() {
                                         return {RunStatus::Failed, saved_failure.error().message};
                                     }
                                 }
-                                return {improved.error().code == protocol::ErrorCode::UnknownResponse
+                                return {!improved.error().submission_attempted.has_value()
                                             ? RunStatus::RecoveryRequired : RunStatus::Failed,
                                         improved.error().message};
                             }
@@ -1214,7 +1604,9 @@ RunResult AutoCompetitionClient::run() {
                                     std::move(metadata));
                                 if (!submitted_refuel) {
                                     log_daily_failure(daily.value().day, "simulation_or_transport_failure",
-                                                      submitted_refuel.error().message);
+                                                      submitted_refuel.error().message,
+                                                      submitted_refuel.error().submission_attempted,
+                                                      "daily-submit");
                                     if (config_.mode == RunMode::Execute) {
                                         static_cast<void>(competition.save(state_path));
                                     }
@@ -1254,7 +1646,7 @@ RunResult AutoCompetitionClient::run() {
                                     const auto failure_phase = optimized.error().code
                                         == planner::PlannerErrorCode::BaselineSimulationFailed
                                         ? "simulation_failure" : "planner_failure";
-                                    log_daily_failure(daily.value().day, failure_phase, optimized.error().message);
+                                            log_daily_failure(daily.value().day, failure_phase, optimized.error().message);
                                     output_ << "planner="
                                             << (config_.planner_mode == PlannerMode::DailyImprovement
                                                 ? "daily-improvement" : "optimizer")
@@ -1357,7 +1749,7 @@ RunResult AutoCompetitionClient::run() {
                                         if (!sent) {
                                             if (config_.mode == RunMode::Execute)
                                                 static_cast<void>(competition.save(state_path));
-                                            return {sent.error().code == protocol::ErrorCode::UnknownResponse
+                                            return {!sent.error().submission_attempted.has_value()
                                                         ? RunStatus::RecoveryRequired : RunStatus::Failed,
                                                     sent.error().message};
                                         }

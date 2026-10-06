@@ -23,6 +23,17 @@ Json progress(const simulator::MatchProgress& p) {
 }
 Json score(const planner::OfficialScore& s) { return Json::array({s.total_unique_brands,s.cumulative_daily_unique_brands,s.total_bowls}); }
 Json readiness(const planner::DailyReadiness& r) { return Json::array({r.uncollected_spot_reachability,r.fuel_reserve,r.patrol_dispersion,r.rendezvous_readiness}); }
+Json candidate_diagnostic(const CandidateDiagnostic& d) {
+    return {{"neighborhoodKind",d.neighborhood_kind},
+        {"fallbackReason",d.fallback_reason},
+        {"acquiredBrandCount",d.acquired_brand_count},
+        {"newlyAcquiredBrandCount",d.newly_acquired_brand_count},
+        {"uncollectedBrandCount",d.uncollected_brand_count},
+        {"officialScoreDelta",score(d.official_score_delta)},
+        {"dailyReadinessDelta",readiness(d.daily_readiness_delta)},
+        {"accepted",d.accepted},{"rejectionReason",d.rejection_reason},
+        {"candidateHash",d.candidate_hash},{"actionHash",d.action_hash},{"planHash",d.plan_hash}};
+}
 Json actions(const simulator::DayActionPlan& plan) {
     Json out=Json::array();
     for (const auto& a : plan) { Json row=Json::array(); for (const auto& v : a) {
@@ -67,7 +78,8 @@ std::optional<Time> observed_daily_deadline(core::UnixTimestamp ends_at,
 DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
     const DailyDeadlinePolicy& policy, std::optional<Time> deadline,
     const planner::PlannerConfig& gc, const planner::RefuelPlannerConfig& rc,
-    const OptimizerConfig& oc, OptimizerClock now, const DailyDeadlineStages& stages, bool run_improvement) {
+    const OptimizerConfig& oc, OptimizerClock now, const DailyDeadlineStages& stages,
+    bool run_improvement, std::chrono::milliseconds worker_configured_timeout) {
     DailyDeadlineResult result;
     auto& r=result.record;
     const auto started=now();
@@ -89,6 +101,8 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
     r={{"schemaVersion",1},{"policy",policy.identity()},{"day",in.daily.day},{"types",types},
        {"snapshotHash",hash(snapshot)},{"startStateHash",hash(start_state)},{"progressHash",hash(progress(in.previous_progress))},
        {"baselineInputHash",input_hash},{"remainingBudgetMs",remaining()},{"baselineRemainingMs",nullptr},
+       {"hardPlanningDeadline",nullptr},{"effectiveStopPoint","shared-hard-planning-deadline"},
+       {"reserveMeaning","optimizer-admission-and-fallback-guard-only"},{"dayStartRemainingMs",remaining()},
        {"baselineGreedyUs",0},{"baselineRefuelUs",0},{"baselineSimulatorUs",0},{"baselineWallUs",0},
        {"plannerSeed",gc.seed},{"improvementSeed",oc.seed},{"baselineCandidateLimit",gc.maximum_candidate_evaluations},
        {"refuelCandidateLimit",rc.maximum_candidate_evaluations},{"baselineEvaluatedCandidates",0},
@@ -97,9 +111,17 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
        {"baselineParity",{{"scope","same-day-start-state"},{"inputHash",input_hash},{"startStateHash",hash(start_state)},
            {"normalBudgetMs",policy.baseline_max.count()},{"status","not-verified"}}},
        {"improvementStarted",false},{"improvementUs",0},{"improvementStartRemainingMs",nullptr},{"improvementEndRemainingMs",nullptr},
+       {"workerConfiguredTimeoutMs",worker_configured_timeout.count()},{"workerEffectiveTimeoutMs",0},
+       {"workerElapsedMs",0},{"remainingBeforeOptimizerMs",nullptr},{"effectiveImprovementBudgetMs",0},
+       {"workerFallbackReason",""},{"workerCandidateReturned",false},
+       {"workerFinalAdoptionPending",false},
        {"improvementTermination","not-started"},{"improvementFailureReason",""},
        {"evaluatedCandidates",0},{"validCandidates",0},{"acceptedCandidates",0},
        {"candidateActionHash",nullptr},{"candidatePlanHash",nullptr},{"candidateEndStateHash",nullptr},
+       {"bestCandidateAtDeadline",false},{"bestCandidateActionHash",nullptr},{"bestCandidatePlanHash",nullptr},
+       {"bestCandidateEndStateHash",nullptr},{"bestCandidateOfficialScore",nullptr},{"bestCandidateReadiness",nullptr},
+       {"bestCandidateNeighborhoodKind",nullptr},{"bestCandidateEvaluatedAtUs",nullptr},
+       {"bestCandidateStrictVerified",false},
        {"actionHash",nullptr},{"planHash",nullptr},{"endStateHash",nullptr},{"score",nullptr},{"readiness",nullptr},
        {"termination","input_failure"},{"failureReason",""},{"adoptionReason","no-validated-baseline"},
        {"futureSnapshotRead",false},{"lookaheadRequestCount",0},{"waitFallbackGenerated",false}};
@@ -130,8 +152,10 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
         return fail("input_failure","day/progress identity mismatch");
     if(in.daily.day==0 && std::any_of(in.daily.traffic.begin(),in.daily.traffic.end(),[](const auto& x){return x.status!=core::RoadStatus::Smooth;}))
         return fail("input_failure","Day0 roads must all be smooth");
-    if(!deadline || remaining()<=policy.reserve.count()) return fail("deadline_exhausted","missing, expired or reserve-only daily deadline");
-    const auto stop=*deadline-policy.reserve;
+    if(!deadline || remaining()<=0) return fail("deadline_exhausted","missing or expired daily deadline");
+    // The caller supplies hardPlanningDeadline = endsAt - communication reserve.
+    // policy.reserve is a start/admission guard, not another wall-clock subtraction.
+    const auto stop=*deadline;
     const auto baseline_start=now();
     const auto baseline_deadline=std::min(stop,baseline_start+policy.baseline_max);
     r["baselineCreatedAfterStartUs"]=micros(started);
@@ -170,8 +194,59 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
     r["baselineRemainingMs"]=remaining(); r["baselineParity"]["status"]="same-input-baseline-verified";
     result.plan=refuel.value().plan; result.simulation=verified.value();
     auto final_score=bs; auto final_readiness=br; r["adoptionReason"]="baseline-retained";
-    if(run_improvement && remaining()>policy.reserve.count()+policy.minimum_improvement.count()) {
-        const auto improvement_start=now(); const auto improvement_deadline=std::min(stop,improvement_start+policy.improvement_max);
+    if (stages.worker && worker_configured_timeout.count() > 0) {
+        const auto worker_started = now();
+        const auto worker_remaining = remaining();
+        const auto effective = std::max<std::int64_t>(0, std::min<std::int64_t>(
+            worker_configured_timeout.count(), worker_remaining));
+        r["workerEffectiveTimeoutMs"] = effective;
+        r["workerStarted"] = effective > 0;
+        r["workerStartRemainingMs"] = worker_remaining;
+        if (effective > 0) {
+            auto worker = stages.worker(in, greedy.value(), refuel.value(), verified.value(),
+                *deadline, Ms{effective}, now);
+            r["workerElapsedMs"] = micros(worker_started) / 1000;
+            r["workerEndRemainingMs"] = remaining();
+            r["worker"] = worker.record;
+            r["workerFallbackReason"] = worker.reason;
+            if (worker.plan && worker.simulation && now() < *deadline) {
+                result.plan = std::move(worker.plan);
+                result.simulation = std::move(worker.simulation);
+                // The policy runner returns a strict candidate for App-level
+                // claim validation and score/readiness comparison. It does not
+                // make the final worker adoption decision.
+                r["workerCandidateReturned"] = true;
+                r["workerFinalAdoptionPending"] = true;
+                r["adoptionReason"] = "worker-candidate-for-app-review";
+                if (worker.record.contains("score") && worker.record["score"].is_array()
+                    && worker.record["score"].size() == 3) {
+                    final_score = {worker.record["score"][0], worker.record["score"][1], worker.record["score"][2]};
+                }
+                if (worker.record.contains("readiness") && worker.record["readiness"].is_array()
+                    && worker.record["readiness"].size() == 4) {
+                    final_readiness = {worker.record["readiness"][0], worker.record["readiness"][1],
+                        worker.record["readiness"][2], worker.record["readiness"][3], {}};
+                }
+            }
+        } else {
+            r["workerStarted"] = false;
+            r["workerFallbackReason"] = "reserve-exhausted";
+        }
+    } else {
+        r["workerStarted"] = false;
+        r["workerFallbackReason"] = "worker-not-configured";
+    }
+    r["remainingBeforeOptimizerMs"] = remaining();
+    const auto remaining_for_improvement = remaining();
+    const auto configured_improvement_cap = policy.size == 32
+        ? std::max<std::int64_t>(0, remaining_for_improvement - policy.minimum_improvement.count())
+        : policy.improvement_max.count();
+    const auto improvement_budget = std::min<std::int64_t>(configured_improvement_cap,
+        remaining_for_improvement);
+    r["effectiveImprovementBudgetMs"] = improvement_budget;
+    if(run_improvement && remaining()>policy.minimum_improvement.count()
+       && improvement_budget > 0) {
+        const auto improvement_start=now(); const auto improvement_deadline=std::min(stop,improvement_start+Ms{improvement_budget});
         r["improvementCreatedAfterStartUs"]=micros(started);
         r["improvementStarted"]=true; r["improvementStartRemainingMs"]=remaining();
         r["improvementDeadlineRemainingMs"]=std::chrono::duration_cast<Ms>(improvement_deadline-improvement_start).count();
@@ -181,7 +256,45 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
         if(!improved) {r["improvementTermination"]=now()>=improvement_deadline?"deadline_exhausted":"planner_failure";r["improvementFailureReason"]="optimizer failed; baseline retained";}
         else {
             const auto& c=improved.value(); r["evaluatedCandidates"]=c.generated_candidates; r["validCandidates"]=c.valid_candidates; r["acceptedCandidates"]=c.accepted_candidates;
-            if(now()>=improvement_deadline || c.termination==OptimizerTermination::Deadline || c.termination==OptimizerTermination::Fallback) {
+            r["candidateDiagnostics"] = Json::array();
+            for (const auto& diagnostic : c.candidate_diagnostics)
+                r["candidateDiagnostics"].push_back(candidate_diagnostic(diagnostic));
+            const bool deadline_result = now()>=improvement_deadline || c.termination==OptimizerTermination::Deadline;
+            const bool deadline_best = c.termination==OptimizerTermination::Deadline
+                && c.best_candidate_at_deadline && c.best_candidate_strict_verified;
+            if (deadline_best) {
+                const auto cp=record_plan(c.plan,c.simulation);
+                const auto cs=planner::official_score(in.previous_progress,c.simulation);
+                std::vector<std::vector<std::size_t>> visits(types.size());
+                bool valid_routes=true;
+                for(const auto& route:c.solution.patrol_routes) {
+                    if(route.agent_index>=visits.size()) {valid_routes=false;break;}
+                    visits[route.agent_index]=route.spot_indices;
+                }
+                const auto cr=planner::daily_readiness(in.match,in.daily,c.simulation,visits);
+                r["bestCandidateAtDeadline"]=true;
+                r["bestCandidateActionHash"]=cp["actionHash"];
+                r["bestCandidatePlanHash"]=cp["planHash"];
+                r["bestCandidateEndStateHash"]=cp["endStateHash"];
+                r["bestCandidateOfficialScore"]=score(cs);
+                r["bestCandidateReadiness"]=readiness(cr);
+                r["bestCandidateNeighborhoodKind"]=c.best_candidate_neighborhood_kind;
+                r["bestCandidateEvaluatedAtUs"]=c.best_candidate_evaluated_at_us;
+                r["bestCandidateStrictVerified"]=true;
+                r["candidateActionHash"]=cp["actionHash"];
+                r["candidatePlanHash"]=cp["planHash"];
+                r["candidateEndStateHash"]=cp["endStateHash"];
+                const auto decision=valid_routes ? evaluate_daily_improvement(bs,br,cs,cr) : DailyImprovementDecision{};
+                r["improvementTermination"]="deadline_exhausted_best_available";
+                r["improvementFailureReason"]="";
+                if(valid_routes && now()<stop && decision.adopt) {
+                    result.plan=c.plan; result.simulation=c.simulation; final_score=cs; final_readiness=cr;
+                    r["adoptionReason"]=decision.reason==DailyImprovementDecisionReason::OfficialScoreImproved
+                        ? "official-score-improved" : "readiness-tie-break";
+                } else {
+                    r["adoptionReason"]="baseline-retained";
+                }
+            } else if(deadline_result || c.termination==OptimizerTermination::Fallback) {
                 r["improvementTermination"]="deadline_exhausted";r["improvementFailureReason"]="optimizer deadline/fallback; baseline retained";
             } else {
                 const auto candidate_started=now();
@@ -207,12 +320,16 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
             }
         }
         r["improvementUs"]=micros(improvement_start); r["improvementEndRemainingMs"]=remaining();
-    } else {r["improvementTermination"]="not-started";r["improvementFailureReason"]=run_improvement?"insufficient remaining time after reserve":"explicitly disabled";}
+    } else {r["improvementTermination"]="not-started";r["improvementFailureReason"]=run_improvement?"insufficient remaining time for minimum improvement":"explicitly disabled";}
     const auto final=record_plan(*result.plan,*result.simulation);
     for(const auto& key:{"actionHash","planHash","endStateHash"}) r[key]=final[key];
     r["score"]=score(final_score);r["readiness"]=readiness(final_readiness);
+    Json predicted_brands=Json::array();
+    for (const auto brand : result.simulation->distinct_brands) predicted_brands.push_back(brand);
+    r["predictedBrands"]=predicted_brands;
+    r["predictedBalls"]=result.simulation->total_balls;
     r["termination"]="completed";r["finalRemainingMs"]=remaining();r["totalWallUs"]=micros(started);
-    if(now()>=stop) {result.plan.reset();result.simulation.reset();r["termination"]="deadline_exhausted";r["failureReason"]="submission reserve reached; do not submit";}
+    if(now()>=stop) {result.plan.reset();result.simulation.reset();r["termination"]="deadline_exhausted";r["failureReason"]="hard planning deadline reached; do not submit";}
     return result;
 }
 } // namespace hexa_udon::optimizer

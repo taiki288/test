@@ -63,7 +63,8 @@ struct AutoClientConfig {
     std::size_t required_agent_count = 0;
     std::vector<LanWorkerEndpoint> lan_workers;
     std::string lan_worker_secret_environment;
-    std::chrono::milliseconds lan_worker_timeout{250};
+    // Zero selects the size-specific Phase 50 cap; a positive value is an explicit override.
+    std::chrono::milliseconds lan_worker_timeout{0};
 };
 
 struct RunResult {
@@ -117,7 +118,9 @@ public:
     [[nodiscard]] RunResult run();
 
 private:
-    [[nodiscard]] protocol::Result<core::MatchConfig> fetch_setting();
+    [[nodiscard]] protocol::Result<core::MatchConfig> fetch_setting(
+        const std::string& phase = "registration",
+        std::optional<protocol::SteadyTime> deadline = std::nullopt);
     [[nodiscard]] protocol::Result<core::DailyState> fetch_state(
         const core::MatchConfig& config,
         std::optional<core::Quantity> current_day,

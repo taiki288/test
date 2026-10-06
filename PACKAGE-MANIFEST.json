@@ -41,7 +41,7 @@
     },
     {
       "path": "docs/operations.md",
-      "sha256": "434ad0ba3948ec39a7c5edf4a1907ef9729931d1ed353519b484e7e8b0fe522a"
+      "sha256": "e4b16a0e5506590e6cce40a81dccbe7f688180afc1a8acf1ae6aff3a406a4506"
     },
     {
       "path": "docs/recovery.md",
@@ -53,11 +53,11 @@
     },
     {
       "path": "include/hexa_udon/app/auto_client.hpp",
-      "sha256": "d0a68c642fa8b033ab44bbc8ec22f8099f2eeeefb695914fd528299f19cd832d"
+      "sha256": "7ba3c645b8d9323086b3ca115f27fec80c546581bd98aff9afd8284b40f05c9b"
     },
     {
       "path": "include/hexa_udon/app/lan_worker.hpp",
-      "sha256": "0834e2e6d7f04ab534e121ea8ee45f7da13d611356e4b74703fb12b5ea32f045"
+      "sha256": "851740fff325ebb1a789b8603202c349f20faec035f35468dd981e69b2e15a29"
     },
     {
       "path": "include/hexa_udon/app/production_profile.hpp",
@@ -85,11 +85,11 @@
     },
     {
       "path": "include/hexa_udon/optimizer/daily_deadline_policy.hpp",
-      "sha256": "9e7dff2ea56e6f01a636e887bdb914c2b91ace3e26cb7326082ad20340be716d"
+      "sha256": "a7e7f0a2d7c61f814342df78e48611fbe8e4dc0c97271dd1485612f27d7a0460"
     },
     {
       "path": "include/hexa_udon/optimizer/optimizer.hpp",
-      "sha256": "edc41fd06dbe35618584b299b8567ca33035394dbe3d2f4d4dc188a2a2690ef4"
+      "sha256": "b52242c1368fd8f181769915322a1281c886be98e266f563f8e76c77ee0d3ae5"
     },
     {
       "path": "include/hexa_udon/pathfinding/important_point_routes.hpp",
@@ -113,11 +113,11 @@
     },
     {
       "path": "include/hexa_udon/protocol/api_client.hpp",
-      "sha256": "eccecc06196528ef88e3de27aadca68af8c46cbeb4cd70acecd81946a1f88f86"
+      "sha256": "df66a3a835fc1b8d244d59b1ce4310ec8f7886be5e3d8e4d6b5e494c89efa19d"
     },
     {
       "path": "include/hexa_udon/protocol/http_transport.hpp",
-      "sha256": "6d8c14e77d96fc7b4bf9b0abbd87c21deec3347cd9a30e7ac5e34fa35fb2bb39"
+      "sha256": "3cca9c9f08f63a6ee571a6fc16eb0d3ab62492adf5814b37fe6357ebef068c70"
     },
     {
       "path": "include/hexa_udon/protocol/json_codec.hpp",
@@ -125,11 +125,11 @@
     },
     {
       "path": "include/hexa_udon/protocol/request_control.hpp",
-      "sha256": "14579bc6e3082675b662b15d7d701ac0e64faa6087aad6c0713de0b0d60faa7c"
+      "sha256": "747b30b2abf88e836e3e7f3271a9fa8573bc44ed9d77c70807ce574c5fd11ab1"
     },
     {
       "path": "include/hexa_udon/protocol/result.hpp",
-      "sha256": "097e7a45616b154e95bb8b752fca2ec7d774ae96396bb895b43dcbd89f5c0fb2"
+      "sha256": "a255a34996106f98e2a2456921a7abaee82b706cde55bf39ab5c5fdca85ff6e7"
     },
     {
       "path": "include/hexa_udon/session/persistence.hpp",
@@ -137,11 +137,11 @@
     },
     {
       "path": "include/hexa_udon/session/polling.hpp",
-      "sha256": "2defe815fbf33705834fd8ce54b476fbcff59aec01517e54d14150ede6890f5d"
+      "sha256": "9c7347ec8c2bca5da10183877f29b20eb19520a1c0e882bf11af1e1685cd3357"
     },
     {
       "path": "include/hexa_udon/session/session.hpp",
-      "sha256": "f55041e1f303bdb901744182c9b3f908739bf375bf1a524b74019c95f0021c41"
+      "sha256": "a0c6f52f71e8987c20a6042d072d276921fd7e824e9e417f401348272bfe5477"
     },
     {
       "path": "include/hexa_udon/simulator/action.hpp",
@@ -153,15 +153,15 @@
     },
     {
       "path": "src/app/auto_client.cpp",
-      "sha256": "0e2c1fe1067849274469e15025e22964fed047a73f09f8e10ba27802b3fd4407"
+      "sha256": "bd4df14aed813bcf5c5fd6cf82b7e35d999fcd3576c7227a1f4d068172085c91"
     },
     {
       "path": "src/app/lan_worker.cpp",
-      "sha256": "232d42c9d415ea7fe6b4df1d43f4052b2a0e36a6a73cf53a7dc9f6bed55c1923"
+      "sha256": "4a697d1fefd379fa32dc38900671227a2205766a9c5ea894b286c20d834634a1"
     },
     {
       "path": "src/app/main.cpp",
-      "sha256": "46e5a7d0dadbffad65f8766955f48994a8f45c344edfa9161c601f83e57dd16c"
+      "sha256": "568db731e6ce9e288126c7171678a9f4ee55db7273c3ef7e63fad1599fd785dd"
     },
     {
       "path": "src/app/production_profile.cpp",
@@ -189,11 +189,11 @@
     },
     {
       "path": "src/optimizer/daily_deadline_policy.cpp",
-      "sha256": "688e21773fedc402e0ca0e93f67ebd60da992f7a33895ef843ebfc715cc1cfc1"
+      "sha256": "670361d388c70f1c69f99171c09363cc44a5d9dc670cfe6d9473fac73f1d833d"
     },
     {
       "path": "src/optimizer/optimizer.cpp",
-      "sha256": "3393910db14c81b299ca32c31ec6e96d07ee61fdb7aafc9fb9aef6bbe293f4ae"
+      "sha256": "d94cfa69308129bb785f19abc6bd7ced61eeffe7b76eb18883557ffafb545033"
     },
     {
       "path": "src/pathfinding/important_point_routes.cpp",
@@ -217,11 +217,11 @@
     },
     {
       "path": "src/protocol/api_client.cpp",
-      "sha256": "8caa3006d77b756f6635da2116c3cad5f1d6b3cc25d3b33e08493f562ed3b3fd"
+      "sha256": "ecc3087d129d1c5cc0e73b1d226fd4488b5b4d79f5f126d429786c2258604af0"
     },
     {
       "path": "src/protocol/http_transport.cpp",
-      "sha256": "2db6042fde65116b2958ada6ae400aaf4f1e4d8e3f64c0615de5bd4746b11a27"
+      "sha256": "2cbc049fe48d37e263edd13b715912b5451c9c01cc9e3a5a3ad5716747c1c8aa"
     },
     {
       "path": "src/protocol/json_codec.cpp",
@@ -229,7 +229,7 @@
     },
     {
       "path": "src/protocol/request_control.cpp",
-      "sha256": "38eca2fafa831cb48b860709e2f41e6821c5024128dbce274e4d72ffe03d1266"
+      "sha256": "afe8cc1a60ba6eb598a7d5868251fc01e81538ca678d5b25f5a2573371d36892"
     },
     {
       "path": "src/session/persistence.cpp",
@@ -237,11 +237,11 @@
     },
     {
       "path": "src/session/polling.cpp",
-      "sha256": "74abdcedee51464085dd82b1fa4178e9fab8d3f3a4ed980e74f3e4823498103a"
+      "sha256": "b8f0af4af0922511b3d578a83194b2b4feb49262446cf6fa5bdc566204c44079"
     },
     {
       "path": "src/session/session.cpp",
-      "sha256": "febb0ad5ebf42d87253d38156de558b30fd8aefdc78696b7dcd5420330be2c54"
+      "sha256": "4b216e363acece9b1b7369d0bed2826404158864a3f0b7b87c9c88c1d2ac5d2e"
     },
     {
       "path": "src/simulator/action.cpp",
