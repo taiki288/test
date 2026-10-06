@@ -118,13 +118,6 @@ std::string agent_state_identity(const core::DailyState& daily) {
     return stable_hash(encoded.str());
 }
 
-std::string configured_spot_identity(const core::MatchConfig& config) {
-    std::ostringstream encoded;
-    for (const auto& spot : config.spots)
-        encoded << spot.brand << ':' << spot.position.value << ':' << spot.max_stock << ',';
-    return stable_hash(encoded.str());
-}
-
 nlohmann::json canonical_planner_input(const core::MatchConfig& config,
                                        const core::DailyState& daily,
                                        const simulator::MatchProgress& progress,
@@ -449,12 +442,7 @@ bool AutoCompetitionClient::has_unknown_submission(const session::SessionSnapsho
 }
 
 void AutoCompetitionClient::print_kinds(const std::vector<core::AgentKind>& kinds) {
-    output_ << "types=[";
-    for (std::size_t index = 0; index < kinds.size(); ++index) {
-        if (index) output_ << ',';
-        output_ << core::to_int(kinds[index]);
-    }
-    output_ << "] (official agent index order)\n";
+    output_ << "type-selection=complete agents=" << kinds.size() << '\n';
 }
 
 void AutoCompetitionClient::print_day_summary(
@@ -462,36 +450,22 @@ void AutoCompetitionClient::print_day_summary(
     const session::SubmissionRecord& record, const simulator::MatchProgress& progress) {
     const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
         unix_time(daily.ends_at) - clock_.wall_now()).count();
-    output_ << "day=" << daily.day << '/' << config.day_steps.size() - 1
-            << " endsAt=" << daily.ends_at << " remainingSeconds=" << std::max<std::int64_t>(0, remaining)
-            << " safetyMarginSeconds=" << config_.safety_margin.count() << '\n'
-            << "actions=omitted localId=" << record.local_id;
-    if (record.revision) output_ << " revision=" << *record.revision;
-    output_ << " predictedBrands=" << record.simulation.brands.size()
-            << " predictedBalls=" << record.simulation.total_balls
-            << " matchBrands=" << progress.acquired_brands.size()
-            << " matchBalls=" << progress.total_balls << '\n';
-    if (record.planner) {
-        const auto& planner = *record.planner;
-        output_ << "  planningInput day=" << daily.day
-                << " matchHash=" << planner.match_identity
-                << " typeHash=" << planner.type_identity
-                << " snapshotHash=" << planner.snapshot_identity
-                << " agentStateHash=" << planner.agent_state_identity
-                << " spotInventoryHash=" << planner.spot_inventory_identity
-                << " nextStateHash=" << planner.next_state_identity
-                << " readiness=" << planner.daily_readiness[0] << ','
-                << planner.daily_readiness[1] << ',' << planner.daily_readiness[2]
-                << ',' << planner.daily_readiness[3]
-                << " officialScoreTieGroup=" << planner.official_score_tie_group_count
-                << " reserveMs=" << planner.safety_reserve_milliseconds
-                << " reason=" << planner.selection_reason << '\n';
+    output_ << "daily-end day=" << daily.day << " score=";
+    if (record.planner && record.planner->official_score.size() == 3) {
+        output_ << record.planner->official_score[0] << ','
+                << record.planner->official_score[1] << ','
+                << record.planner->official_score[2];
+    } else {
+        output_ << "unknown";
     }
-    for (std::size_t index = 0; index < record.simulation.end_agents.size(); ++index) {
-        const auto& agent = record.simulation.end_agents[index];
-        output_ << "  agent=" << index << " endPos=" << agent.position.value
-                << " endFuel=" << agent.fuel << '\n';
-    }
+    output_ << " candidateSource="
+            << (record.planner ? record.planner->planner_kind : "baseline")
+            << " adoption=" << (record.planner ? record.planner->selection_reason : "baseline-retained")
+            << " post=" << (record.revision ? "success" : "dry-run") << '\n';
+    static_cast<void>(config);
+    static_cast<void>(remaining);
+    static_cast<void>(progress);
+    static_cast<void>(record);
 }
 
 RunResult AutoCompetitionClient::run() {
@@ -512,7 +486,7 @@ RunResult AutoCompetitionClient::run() {
     auto setting = fetch_setting("registration");
     if (!setting) return {stop_requested_() ? RunStatus::Stopped : RunStatus::Failed,
                           setting.error().message};
-    output_ << "session=setting-received startsAt=" << setting.value().starts_at << '\n';
+    output_ << "startup=setting-received\n";
     if (config_.profile_set_version) {
         try {
             apply_v2_profile_set(config_, setting.value(), config_.profile_set_directory,
@@ -553,18 +527,8 @@ RunResult AutoCompetitionClient::run() {
                        ? (config_.required_agent_count * (config_.required_agent_count - 1)) / 2 : 1)
                 : 0;
         }
-        output_ << "profile=" << config_.profile_id << " version=" << config_.profile_version << " type-selector=prematch minSupply="
-                << config_.type_selector_min_supply << " maxSupply=" << config_.type_selector_max_supply
-                << " selectorCandidates=" << candidate_count
-                << " allowedSupplyCounts=";
-        if (config_.type_selector_allowed_supply_counts.empty()) output_ << "range";
-        else { output_ << "["; for (std::size_t i=0;i<config_.type_selector_allowed_supply_counts.size();++i) { if(i) output_ << ","; output_ << config_.type_selector_allowed_supply_counts[i]; } output_ << "]"; }
-        output_ << " boundary=setting-derived-Day0 planner=greedy-refuel"
-                   " selectorMs=" << config_.type_selector_budget.count()
-                << " greedyMs=" << config_.planner_budget.count()
-                << " refuelMs=" << config_.refuel_budget.count()
-                << " seed=" << config_.planner_seed
-                << " dailyPlanner=" << (config_.daily_deadline_policy ? "daily-improvement" : "greedy-refuel") << '\n';
+        static_cast<void>(candidate_count);
+        output_ << "type-selection=start mode=prematch\n";
     }
     const auto state_path = config_.state_directory / "session.json";
     session::SessionController initial(api_, setting.value(), nullptr, logger_);
@@ -595,10 +559,10 @@ RunResult AutoCompetitionClient::run() {
             return {RunStatus::RecoveryRequired,
                     "requested types differ from the saved official-order types"};
         }
-        output_ << "type-selection=restored; selector will not run or resubmit\n";
+        output_ << "type-selection=restored\n";
     } else if (config_.explicit_kinds) {
         selected_kinds = *config_.explicit_kinds;
-        output_ << "type-selection=explicit --types\n";
+        output_ << "type-selection=explicit\n";
     } else if (config_.type_selector == TypeSelectorMode::Prematch) {
         if (setting.value().starts_at != 0) {
             return {RunStatus::Failed, "prematch type selector is only allowed before startsAt is fixed"};
@@ -606,8 +570,7 @@ RunResult AutoCompetitionClient::run() {
         if (config_.type_selector_budget.count() <= 0 || config_.type_submission_reserve.count() <= 0) {
             return {RunStatus::Failed, "type selector and POST reserve budgets must be positive"};
         }
-        output_ << "type-selection=PREMATCH initial-state=setting-derived-Day0 "
-                   "(configured positions/fuel; all roads smooth)\n";
+        output_ << "type-selection=start mode=prematch\n";
         const auto initial_state = make_setting_day_zero(setting.value());
         const auto selector_started = clock_.now();
         const auto selector_deadline = selector_started + config_.type_selector_budget;
@@ -697,69 +660,10 @@ RunResult AutoCompetitionClient::run() {
         for (const auto count : chosen.evaluated_by_supply_count) evaluated_count += count;
         const auto selected_evaluation = std::find_if(chosen.evaluations.begin(), chosen.evaluations.end(),
             [&](const auto& item) { return item.candidate == chosen.selected; });
-        output_ << "type-selector seed=" << chosen.seed << " initialPositionsHash="
-                << chosen.initial_positions_hash << " evaluatedCandidates=" << evaluated_count
-                << " candidates=" << chosen.total_candidates
-                << " maxSupply=" << config_.type_selector_max_supply
-                << " unevaluated=" << chosen.unevaluated_candidates
-                << " confidenceLimited=" << (chosen.confidence_limited ? "yes" : "no")
-                << " budgetMs=" << config_.type_selector_budget.count()
-                << " postReserveMs=" << config_.type_submission_reserve.count()
-                << " elapsedUs=" << chosen.elapsed.count()
-                << " effectiveBudgetMs=" << chosen.effective_budget_milliseconds
-                << " startRemainingMs=" << chosen.started_remaining_milliseconds
-                << " baselineRemainingMs=" << chosen.baseline_pass_remaining_milliseconds
-                << " finalRemainingMs=" << chosen.final_remaining_milliseconds
-                << " candidateSetHash=" << chosen.candidate_set_hash
-                << " stageUs=enum:" << chosen.candidate_enumeration_microseconds
-                << ",greedy:" << chosen.greedy_microseconds
-                << ",refuel:" << chosen.refuel_microseconds
-                << ",optimizer:" << chosen.optimizer_microseconds
-                << ",simulator:unavailable"
-                << " secondPass=" << (chosen.second_pass_attempted ? "yes" : "no")
-                << " secondPassReason=" << chosen.second_pass_reason
-                << " termination=" << selection_metadata->termination << '\n';
-        output_ << "type-selector supply-counts=";
-        for (std::size_t supplies = 0; supplies < chosen.total_by_supply_count.size(); ++supplies) {
-            if (supplies) output_ << ',';
-            output_ << supplies << ':' << chosen.evaluated_by_supply_count[supplies]
-                    << '/' << chosen.total_by_supply_count[supplies];
-        }
-        output_ << " selected=[";
-        for (std::size_t i = 0; i < chosen.selected.kinds.size(); ++i) {
-            if (i) output_ << ',';
-            output_ << core::to_int(chosen.selected.kinds[i]);
-        }
-        output_ << "] minSupply=" << config_.type_selector_min_supply << " budgetMs=" << config_.type_selector_budget.count()
-                << " selectionMethod=" << chosen.selection_method
-                << " optimizerStatus=" << chosen.optimizer_status << '\n';
-        if (!chosen.fallback_reason.empty())
-            output_ << "type-selector fallback=" << chosen.fallback_reason << '\n';
-        if (selected_evaluation != chosen.evaluations.end()) {
-            output_ << "type-selector-selected score=" << selected_evaluation->score.total_unique_brands
-                    << ',' << selected_evaluation->score.cumulative_daily_unique_brands
-                    << ',' << selected_evaluation->score.total_bowls
-                    << " method=" << (selected_evaluation->method == planner::TypeEvaluationMethod::Optimized
-                        ? "optimized" : selected_evaluation->method == planner::TypeEvaluationMethod::Refuel
-                        ? "greedy-refuel" : selected_evaluation->method == planner::TypeEvaluationMethod::Greedy
-                        ? "greedy" : "all-wait-fallback") << '\n';
-        }
-        for (const auto& item : chosen.evaluations) {
-            output_ << "  candidate types=[";
-            for (std::size_t i = 0; i < item.candidate.kinds.size(); ++i) {
-                if (i) output_ << ',';
-                output_ << core::to_int(item.candidate.kinds[i]);
-            }
-            output_ << "] score=" << item.score.total_unique_brands << ','
-                    << item.score.cumulative_daily_unique_brands << ',' << item.score.total_bowls
-                    << " method=" << (item.method == planner::TypeEvaluationMethod::Optimized
-                        ? "optimized" : item.method == planner::TypeEvaluationMethod::Refuel
-                        ? "greedy-refuel" : item.method == planner::TypeEvaluationMethod::Greedy
-                        ? "greedy" : "wait-fallback")
-                    << " termination=" << item.termination << '\n';
-        }
+        static_cast<void>(evaluated_count);
+        output_ << "type-selection=complete termination=" << selection_metadata->termination << '\n';
         if (!chosen.selection_warning.empty())
-            output_ << "type-selector-warning=" << chosen.selection_warning << '\n';
+            output_ << "warning=type-selection " << chosen.selection_warning << '\n';
         protocol::OperationLogEntry selector_log;
         selector_log.timestamp_utc = protocol::utc_timestamp();
         selector_log.operation = "prematch-type-selection";
@@ -816,7 +720,7 @@ RunResult AutoCompetitionClient::run() {
         auto preset = round_preset(setting.value().initial_agent_positions.size());
         if (!preset) return {RunStatus::Failed, preset.error().message};
         selected_kinds = preset.take();
-        output_ << "type-selection=fixed-preset\n";
+        output_ << "type-selection=fixed\n";
     }
     if (selected_kinds.size() != setting.value().initial_agent_positions.size())
         return {RunStatus::Failed, "type count does not match agents"};
@@ -850,9 +754,9 @@ RunResult AutoCompetitionClient::run() {
         }
         auto saved = initial.save(state_path);
         if (!saved) return {RunStatus::Failed, saved.error().message};
-        output_ << "session=agent-types-submitted\n";
+        output_ << "post=agent-types success\n";
     } else if (config_.mode == RunMode::DryRun) {
-        output_ << "session=agent-types-dry-run body=omitted\n";
+        output_ << "post=agent-types dry-run\n";
         if (config_.type_selector == TypeSelectorMode::Prematch
             && !(config_.profile_version == 2 && initial.snapshot().submitted_agent_kinds))
             return {RunStatus::Completed, "prematch type-selector dry-run completed without POST"};
@@ -861,7 +765,7 @@ RunResult AutoCompetitionClient::run() {
     // Once type registration is complete, wait for the first daily state on GET /
     // instead of re-fetching the already accepted match setting. fetch_state()
     // owns the 403/Retry-After/backoff/deadline policy for this phase.
-    output_ << "session=waiting-for-match startsAt=" << setting.value().starts_at << '\n';
+    output_ << "waiting-for-match\n";
 
     session::SessionController competition(api_, setting.value(), nullptr, logger_);
     if (std::filesystem::exists(state_path)) {
@@ -995,12 +899,7 @@ RunResult AutoCompetitionClient::run() {
             log_daily_failure(daily.value().day, "input_failure", "Day0 road is not smooth");
             return {RunStatus::RecoveryRequired, "Day0 roads must be smooth"};
         }
-        output_ << "daily-input day=" << daily.value().day
-                << " typeHash=" << type_identity(selected_kinds)
-                << " snapshotHash=" << daily_snapshot_identity(setting.value(), daily.value())
-                << " agentStateHash=" << agent_state_identity(daily.value())
-                << " spotInventoryHash=" << configured_spot_identity(setting.value())
-                << " futureSnapshot=reject\n";
+        output_ << "daily-start day=" << daily.value().day << '\n';
 
         const bool already_done = config_.mode == RunMode::Execute
             ? competition.snapshot().accepted_days.contains(daily.value().day)
@@ -1160,13 +1059,13 @@ RunResult AutoCompetitionClient::run() {
                                     {"comparison", observation_comparison},
                                     {"claimMismatchFields", observation_mismatch_fields},
                                     {"adoption", observation_adoption}});
-                                output_ << "lan-worker-result workerIndex=" << worker_index
-                                        << " workerCount=" << config_.lan_workers.size()
-                                        << " requestIdDigest=" << protocol::request_id_digest_or_missing(worker_request.at("requestId"))
-                                        << " elapsedMs=" << elapsed_ms
-                                        << " termination=" << observation_termination
-                                        << " claim=" << observation_claim
-                                        << " adoption=" << observation_adoption << '\n';
+                                if (observation_claim == "timeout"
+                                    || observation_rejection_reason == "claim-mismatch"
+                                    || observation_rejection_reason == "strict-revalidation-failed"
+                                    || observation_rejection_reason == "transport-failure") {
+                                    output_ << "warning=lan-worker "
+                                            << observation_rejection_reason << '\n';
+                                }
                             }};
                             const auto reply = pending_replies[worker_index].reply.get();
                             if (!reply.success) {
@@ -1402,7 +1301,6 @@ RunResult AutoCompetitionClient::run() {
                     planned.record["submissionAttempted"] = false;
                 }
                 competition.record_daily_planning(planned.record);
-                output_ << "daily-deadline " << planned.record.dump() << '\n';
                 protocol::OperationLogEntry entry;
                 entry.operation = "daily-deadline-policy"; entry.day = daily.value().day;
                 entry.phase = "daily-submit";
@@ -1505,50 +1403,13 @@ RunResult AutoCompetitionClient::run() {
                     [&] { return clock_.now(); });
                 if (!planned) {
                     log_daily_failure(daily.value().day, "planner_failure", planned.error().message);
-                    output_ << "planner=greedy fallback=yes message=" << planned.error().message << '\n';
+                    output_ << "warning=planner fallback=baseline-retained\n";
                 } else {
                     const auto& result = planned.value();
-                    output_ << "planner=greedy baseline="
-                            << result.baseline_score.total_unique_brands << ','
-                            << result.baseline_score.cumulative_daily_unique_brands << ','
-                            << result.baseline_score.total_bowls
-                            << " greedy=" << result.score.total_unique_brands << ','
-                            << result.score.cumulative_daily_unique_brands << ','
-                            << result.score.total_bowls
-                            << " improved="
-                            << (planner::better_official_score(result.score, result.baseline_score)
-                                    ? "yes" : "no")
-                            << " candidates=" << result.evaluated_candidates
-                            << " accepted=" << result.accepted_improvements
-                            << " elapsedUs=" << result.elapsed.count()
-                            << " termination=" << static_cast<int>(result.termination)
-                            << " baselineRevision=";
-                    if (submitted.value().revision) output_ << *submitted.value().revision;
-                    else output_ << "none";
-                    output_ << '\n';
-                    output_ << "daily-replan day=" << daily.value().day
-                            << " status=simulator-verified readiness="
-                            << result.daily_readiness.uncollected_spot_reachability << ','
-                            << result.daily_readiness.fuel_reserve << ','
-                            << result.daily_readiness.patrol_dispersion << ','
-                            << result.daily_readiness.rendezvous_readiness
-                            << " tieGroup=" << result.official_score_tie_group_count
-                            << " snapshotHash=" << daily_snapshot_identity(setting.value(), daily.value())
-                            << " nextStateHash=" << agent_state_identity(daily.value()) << '\n';
-                    for (std::size_t agent = 0; agent < result.visited_spots.size(); ++agent) {
-                        output_ << "  agent=" << agent << " spots=";
-                        for (const auto spot : result.visited_spots[agent]) output_ << spot << ',';
-                        output_ << " objectives=";
-                        for (const auto objective : result.route_objectives[agent]) {
-                            output_ << (objective == pathfinding::RouteObjective::Fastest
-                                            ? "fastest" : "fuel") << ',';
-                        }
-                        output_ << " travelSteps=" << result.agent_travel_steps[agent]
-                                << " endFuel=" << result.simulation.end_agents[agent].fuel << '\n';
-                    }
+                    output_ << "planner=greedy candidateSource=greedy\n";
                     if (planner::better_official_score(result.score, result.baseline_score)) {
                         if (deadline.remaining(clock_.now()).count() <= 0) {
-                            output_ << "planner-improvement=not-sent reason=deadline\n";
+                            output_ << "warning=deadline planner-improvement-not-sent\n";
                         } else {
                             session::PlannerSubmissionMetadata metadata;
                             metadata.planner_kind = "greedy";
@@ -1585,10 +1446,8 @@ RunResult AutoCompetitionClient::run() {
                                             ? RunStatus::RecoveryRequired : RunStatus::Failed,
                                         improved.error().message};
                             }
-                            output_ << "greedyRevision=";
-                            if (improved.value().revision) output_ << *improved.value().revision;
-                            else output_ << "dry-run";
-                            output_ << '\n';
+                            output_ << "post=greedy "
+                                    << (improved.value().revision ? "success" : "dry-run") << '\n';
                             if (config_.mode == RunMode::Execute) {
                                 auto saved_improvement = competition.save(state_path);
                                 if (!saved_improvement) {
@@ -1611,40 +1470,13 @@ RunResult AutoCompetitionClient::run() {
                             refuel_deadline, [&] { return clock_.now(); });
                         if (!refueled) {
                             log_daily_failure(daily.value().day, "planner_failure", refueled.error().message);
-                            output_ << "planner=refuel fallback=yes message="
-                                    << refueled.error().message << '\n';
+                            output_ << "warning=planner fallback=baseline-retained\n";
                         } else {
                             const auto& refuel = refueled.value();
                             const bool refuel_improved = planner::better_official_score(
                                 refuel.score, result.score);
-                            output_ << "planner=refuel greedy="
-                                    << result.score.total_unique_brands << ','
-                                    << result.score.cumulative_daily_unique_brands << ','
-                                    << result.score.total_bowls << " refuel="
-                                    << refuel.score.total_unique_brands << ','
-                                    << refuel.score.cumulative_daily_unique_brands << ','
-                                    << refuel.score.total_bowls
-                                    << " improved=" << (refuel_improved ? "yes" : "no")
-                                    << " candidates=" << refuel.evaluated_candidates
-                                    << " elapsedUs=" << refuel.elapsed.count()
-                                    << " termination=" << static_cast<int>(refuel.termination) << '\n';
-                            output_ << "daily-replan day=" << daily.value().day
-                                    << " status=simulator-verified readiness="
-                                    << refuel.daily_readiness.uncollected_spot_reachability << ','
-                                    << refuel.daily_readiness.fuel_reserve << ','
-                                    << refuel.daily_readiness.patrol_dispersion << ','
-                                    << refuel.daily_readiness.rendezvous_readiness
-                                    << " tieGroup=" << refuel.official_score_tie_group_count
-                                    << " snapshotHash=" << daily_snapshot_identity(setting.value(), daily.value())
-                                    << " nextStateHash=" << agent_state_identity(daily.value()) << '\n';
-                            for (const auto& meeting : refuel.rendezvous) {
-                                output_ << "  rendezvous patrol=" << meeting.patrol_agent
-                                        << " supply=" << meeting.supply_agent
-                                        << " step=" << meeting.step
-                                        << " cell=" << meeting.cell.value
-                                        << " fuel=" << meeting.fuel_before << "->"
-                                        << meeting.fuel_after << '\n';
-                            }
+                            output_ << "planner=refuel candidateSource=greedy-refuel"
+                                    << " adoption=" << (refuel_improved ? "improved" : "baseline-retained") << '\n';
                             if (refuel_improved && deadline.remaining(clock_.now()).count() > 0) {
                                 session::PlannerSubmissionMetadata metadata;
                                 metadata.planner_kind = "greedy-refuel";
@@ -1689,11 +1521,8 @@ RunResult AutoCompetitionClient::run() {
                                                 ? RunStatus::RecoveryRequired : RunStatus::Failed,
                                             submitted_refuel.error().message};
                                 }
-                                output_ << "refuelRevision=";
-                                if (submitted_refuel.value().revision) {
-                                    output_ << *submitted_refuel.value().revision;
-                                } else output_ << "dry-run";
-                                output_ << '\n';
+                                output_ << "post=refuel "
+                                        << (submitted_refuel.value().revision ? "success" : "dry-run") << '\n';
                                 if (config_.mode == RunMode::Execute) {
                                     auto saved_refuel = competition.save(state_path);
                                     if (!saved_refuel) return {RunStatus::Failed,
@@ -1721,12 +1550,7 @@ RunResult AutoCompetitionClient::run() {
                                         == planner::PlannerErrorCode::BaselineSimulationFailed
                                         ? "simulation_failure" : "planner_failure";
                                             log_daily_failure(daily.value().day, failure_phase, optimized.error().message);
-                                    output_ << "planner="
-                                            << (config_.planner_mode == PlannerMode::DailyImprovement
-                                                ? "daily-improvement" : "optimizer")
-                                            << " fallback=yes reason=baseline-retained termination="
-                                            << failure_phase << " failureCount=1 message="
-                                            << optimized.error().message << '\n';
+                                    output_ << "warning=planner fallback=baseline-retained\n";
                                 } else {
                                     const auto& value = optimized.value();
                                     const bool use_refuel_baseline =
@@ -1737,40 +1561,10 @@ RunResult AutoCompetitionClient::run() {
                                     const auto decision = optimizer::evaluate_daily_improvement(
                                         adopted_score, adopted_readiness, value.score, value.readiness);
                                     const bool improved = decision.adopt;
-                                    output_ << "planner="
+                                    output_ << "planner=candidate candidateSource="
                                             << (config_.planner_mode == PlannerMode::DailyImprovement
-                                                ? "daily-improvement" : "optimizer")
-                                            << " initial="
-                                            << value.initial_score.total_unique_brands << ','
-                                            << value.initial_score.cumulative_daily_unique_brands << ','
-                                            << value.initial_score.total_bowls << " best="
-                                            << value.score.total_unique_brands << ','
-                                            << value.score.cumulative_daily_unique_brands << ','
-                                            << value.score.total_bowls
-                                            << " improved=" << (improved ? "yes" : "no")
-                                            << " iterations=" << value.iterations
-                                            << " generated=" << value.generated_candidates
-                                            << " prefiltered=" << value.prefiltered_candidates
-                                            << " valid=" << value.valid_candidates
-                                            << " invalid=" << value.invalid_candidates
-                                            << " simulatorRuns=" << value.simulator_runs
-                                            << " accepted=" << value.accepted_candidates
-                                            << " elapsedUs=" << value.elapsed.count()
-                                            << " seed=" << value.seed
-                                            << " baselineReadiness=" << adopted_readiness.uncollected_spot_reachability
-                                            << ',' << adopted_readiness.fuel_reserve << ','
-                                            << adopted_readiness.patrol_dispersion << ','
-                                            << adopted_readiness.rendezvous_readiness
-                                            << " finalReadiness=" << value.readiness.uncollected_spot_reachability
-                                            << ',' << value.readiness.fuel_reserve << ','
-                                            << value.readiness.patrol_dispersion << ','
-                                            << value.readiness.rendezvous_readiness
-                                            << " reason=" << (decision.reason ==
-                                                optimizer::DailyImprovementDecisionReason::OfficialScoreImproved
-                                                ? "official-score-improved"
-                                                : decision.reason == optimizer::DailyImprovementDecisionReason::ReadinessTieBreak
-                                                    ? "readiness-tie-break" : "baseline-retained")
-                                            << " termination=" << static_cast<int>(value.termination) << '\n';
+                                                ? "daily-improvement" : "optimized")
+                                            << " adoption=" << (improved ? "adopted" : "baseline-retained") << '\n';
                                     if (improved && deadline.remaining(clock_.now()).count() > 0) {
                                         session::PlannerSubmissionMetadata metadata;
                                         metadata.planner_kind = config_.planner_mode == PlannerMode::DailyImprovement
@@ -1827,10 +1621,8 @@ RunResult AutoCompetitionClient::run() {
                                                         ? RunStatus::RecoveryRequired : RunStatus::Failed,
                                                     sent.error().message};
                                         }
-                                        output_ << "optimizedRevision=";
-                                        if (sent.value().revision) output_ << *sent.value().revision;
-                                        else output_ << "dry-run";
-                                        output_ << '\n';
+                                        output_ << "post=optimized "
+                                                << (sent.value().revision ? "success" : "dry-run") << '\n';
                                         if (config_.mode == RunMode::Execute) {
                                             auto saved_optimized = competition.save(state_path);
                                             if (!saved_optimized)

@@ -38,22 +38,37 @@ std::string hex_digest(std::string_view value) {
     return stream.str();
 }
 
-bool write_all(int fd, std::string_view data) {
+bool wait_fd(int fd, bool writable, std::chrono::milliseconds timeout);
+
+bool write_all(int fd, std::string_view data,
+               const std::chrono::steady_clock::time_point deadline) {
     std::size_t offset = 0;
     while (offset < data.size()) {
+        const auto timeout = remaining_worker_timeout(deadline, std::chrono::steady_clock::now());
+        if (timeout.count() <= 0 || !wait_fd(fd, true, timeout)
+            || std::chrono::steady_clock::now() >= deadline) return false;
         const auto written = ::send(fd, data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
-        if (written <= 0) return false;
+        if (written <= 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            return false;
+        }
         offset += static_cast<std::size_t>(written);
     }
     return true;
 }
 
-std::optional<std::string> read_line(int fd, std::size_t maximum) {
+std::optional<std::string> read_line(
+    int fd, std::size_t maximum, const std::chrono::steady_clock::time_point deadline) {
     std::string result;
     result.reserve(std::min<std::size_t>(maximum, 4096));
     std::array<char, 1024> buffer{};
     while (result.size() <= maximum) {
+        const auto timeout = remaining_worker_timeout(deadline, std::chrono::steady_clock::now());
+        if (timeout.count() <= 0 || !wait_fd(fd, false, timeout)
+            || std::chrono::steady_clock::now() >= deadline) return std::nullopt;
         const auto count = ::recv(fd, buffer.data(), buffer.size(), 0);
+        if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
         if (count <= 0) return std::nullopt;
         result.append(buffer.data(), static_cast<std::size_t>(count));
         const auto end = result.find('\n');
@@ -179,6 +194,14 @@ nlohmann::json agents_json(const std::vector<core::AgentState>& agents) {
 
 }  // namespace
 
+std::chrono::milliseconds remaining_worker_timeout(
+    const std::chrono::steady_clock::time_point deadline,
+    const std::chrono::steady_clock::time_point now) noexcept {
+    if (now >= deadline) return std::chrono::milliseconds{0};
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    return std::max(std::chrono::milliseconds{1}, remaining);
+}
+
 std::optional<LanWorkerEndpoint> parse_lan_worker_endpoint(const std::string& value) {
     const auto separator = value.rfind(':');
     if (separator == std::string::npos || separator == 0 || separator + 1 >= value.size()) return std::nullopt;
@@ -220,6 +243,7 @@ LanWorkerReply request_lan_worker(const LanWorkerEndpoint& endpoint,
                                   const nlohmann::json& request,
                                   std::chrono::milliseconds timeout,
                                   std::size_t maximum_frame_bytes) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     if (secret.empty()) return {false, {}, "worker secret is empty"};
     if (request.dump().size() > maximum_frame_bytes) return {false, {}, "request is oversized"};
     addrinfo hints{};
@@ -236,15 +260,11 @@ LanWorkerReply request_lan_worker(const LanWorkerEndpoint& endpoint,
         if (fd < 0) continue;
         const int flags = ::fcntl(fd, F_GETFL, 0);
         ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-        const auto connected = ::connect(fd, item->ai_addr, item->ai_addrlen) == 0
-            || (errno == EINPROGRESS && wait_fd(fd, true, timeout));
+        const auto connect_timeout = remaining_worker_timeout(deadline, std::chrono::steady_clock::now());
+        const auto connected = connect_timeout.count() > 0
+            && (::connect(fd, item->ai_addr, item->ai_addrlen) == 0
+                || (errno == EINPROGRESS && wait_fd(fd, true, connect_timeout)));
         if (connected) {
-            ::fcntl(fd, F_SETFL, flags);
-            timeval tv{};
-            tv.tv_sec = static_cast<long>(timeout.count() / 1000);
-            tv.tv_usec = static_cast<decltype(tv.tv_usec)>((timeout.count() % 1000) * 1000);
-            ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             break;
         }
         ::close(fd); fd = -1;
@@ -255,11 +275,10 @@ LanWorkerReply request_lan_worker(const LanWorkerEndpoint& endpoint,
     frame["protocolVersion"] = protocol_version;
     frame["auth"] = worker_auth_digest(secret, frame);
     const auto encoded = frame.dump() + "\n";
-    if (!wait_fd(fd, true, timeout) || !write_all(fd, encoded)) {
+    if (!write_all(fd, encoded, deadline)) {
         ::close(fd); return {false, {}, "worker write timeout"};
     }
-    if (!wait_fd(fd, false, timeout)) { ::close(fd); return {false, {}, "worker reply timeout"}; }
-    const auto line = read_line(fd, maximum_frame_bytes);
+    const auto line = read_line(fd, maximum_frame_bytes, deadline);
     ::close(fd);
     if (!line) return {false, {}, "worker reply missing or oversized"};
     try {
@@ -286,28 +305,20 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
     if (!bind_result
         || ::bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0
         || ::listen(server, 4) != 0) { ::close(server); output << "worker-error=listen\n"; return 1; }
-    output << "worker=ready endpointDigest="
-           << hex_digest(config.listen.host + ":" + std::to_string(config.listen.port)) << "\n";
-    output << "worker-event phase=start workerIndex=" << config.worker_index
-           << " workerCount=" << config.worker_count
-           << " endpointDigest=" << hex_digest(config.listen.host + ":" + std::to_string(config.listen.port)) << '\n';
+    output << "worker=ready\n";
     while (!stop_requested()) {
         if (!wait_fd(server, false, std::chrono::milliseconds{100})) continue;
         const int client = ::accept(server, nullptr, nullptr);
         if (client < 0) continue;
-        const auto line = read_line(client, config.maximum_frame_bytes);
+        const auto client_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        const auto flags = ::fcntl(client, F_GETFL, 0);
+        if (flags >= 0) static_cast<void>(::fcntl(client, F_SETFL, flags | O_NONBLOCK));
+        const auto line = read_line(client, config.maximum_frame_bytes, client_deadline);
         nlohmann::json reply;
         nlohmann::json request = nlohmann::json::object();
         if (!line) reply = response_failure("malformed-or-oversized-request");
         else try {
             request = nlohmann::json::parse(*line);
-            const auto planner_input_json = request.value("plannerInput", nlohmann::json::object());
-            output << "worker-event phase=received workerIndex="
-                   << request.value("workerIndex", config.worker_index)
-                   << " workerCount=" << request.value("workerCount", config.worker_count)
-                   << " requestIdDigest=" << protocol::request_id_digest_or_missing(request.value("requestId", nlohmann::json(nullptr)))
-                   << " inputHash=" << request.value("payloadHash", "")
-                   << " seed=" << planner_input_json.value("plannerSeed", std::uint64_t{0}) << '\n';
             static const std::set<std::string> allowed_request{
                 "protocolVersion", "requestId", "auth", "evaluatorVersion", "day", "size",
                 "agentCount", "typeIdentity", "snapshotIdentity", "mapIdentity", "stateIdentity",
@@ -338,7 +349,7 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                         reply["requestIdDigest"] = protocol::request_id_digest_or_missing(
                             request.value("requestId", nlohmann::json(nullptr)));
                         const auto encoded = reply.dump() + "\n";
-                        static_cast<void>(write_all(client, encoded));
+                        static_cast<void>(write_all(client, encoded, client_deadline));
                         ::close(client);
                         continue;
                     }
@@ -429,15 +440,6 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                                              {"termination", termination}, {"failureReason", ""},
                                              {"futureSnapshotRead", false}, {"lookahead", 0},
                                              {"networkRequests", 0}, {"postCount", 0}};
-                                    output << "worker-event phase=planned workerIndex="
-                                           << request.value("workerIndex", config.worker_index)
-                                           << " elapsedMs=" << optimized.value().elapsed.count() / 1000
-                                           << " termination=" << termination
-                                           << " candidateCount=" << optimized.value().generated_candidates
-                                           << " score=" << optimized.value().score.total_unique_brands << ','
-                                           << optimized.value().score.cumulative_daily_unique_brands << ','
-                                           << optimized.value().score.total_bowls
-                                           << " readinessDigest=" << value_hash(reply.at("readiness")) << '\n';
                                 }
                             }
                         }
@@ -451,11 +453,7 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
             reply["requestIdDigest"] = "missing";
         }
         const auto encoded = reply.dump() + "\n";
-        static_cast<void>(write_all(client, encoded));
-        output << "worker-event phase=reply workerIndex="
-               << reply.value("workerIndex", config.worker_index)
-               << " requestIdDigest=" << reply.value("requestIdDigest", "missing")
-               << " replySent=true\n";
+        static_cast<void>(write_all(client, encoded, client_deadline));
         ::close(client);
     }
     ::close(server);

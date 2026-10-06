@@ -1,4 +1,5 @@
 #include "hexa_udon/optimizer/optimizer.hpp"
+#include "hexa_udon/core/hex_distance.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -77,36 +78,6 @@ std::string solution_digest(const StructuredSolution& solution) {
 
 std::set<core::Quantity> acquired_brands(const planner::PlannerInput& input) {
     return {input.previous_progress.acquired_brands.begin(), input.previous_progress.acquired_brands.end()};
-}
-
-std::int64_t hex_distance(const core::MapDefinition& map,
-    const core::CellIndex a, const core::CellIndex b) {
-    const auto first = map.coordinate(a);
-    const auto second = map.coordinate(b);
-    if (!first || !second) return std::numeric_limits<std::int64_t>::max();
-
-    // The map uses an odd-row offset layout. Convert both cells to axial/cube
-    // coordinates so nearby selection follows the map topology, not CellIndex.
-    const auto axial_q = [](const core::HexCoord coordinate) {
-        return static_cast<std::int64_t>(coordinate.col)
-            - static_cast<std::int64_t>(
-                (coordinate.row - (coordinate.row & 1)) / 2);
-    };
-    const auto axial_r = [](const core::HexCoord coordinate) {
-        return static_cast<std::int64_t>(coordinate.row);
-    };
-    const auto first_q = axial_q(*first);
-    const auto first_r = axial_r(*first);
-    const auto second_q = axial_q(*second);
-    const auto second_r = axial_r(*second);
-    const auto first_x = first_q;
-    const auto first_z = first_r;
-    const auto first_y = -first_x - first_z;
-    const auto second_x = second_q;
-    const auto second_z = second_r;
-    const auto second_y = -second_x - second_z;
-    return (std::llabs(first_x - second_x) + std::llabs(first_y - second_y)
-        + std::llabs(first_z - second_z)) / 2;
 }
 
 template <class T> bool checked_add(const T a, const T b, T& result) {
@@ -451,7 +422,7 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
             for (std::size_t i = 0; i < a.spot_indices.size(); ++i) {
                 const auto route_spot = a.spot_indices[i];
                 if (route_spot >= input.match.spots.size()) continue;
-                const auto distance = hex_distance(input.match.map,
+                const auto distance = core::hex_distance(input.match.map,
                     input.match.spots[route_spot].position, input.match.spots[spot].position);
                 if (distance < best_distance
                     || (distance == best_distance && route_spot < nearest_spot)) {

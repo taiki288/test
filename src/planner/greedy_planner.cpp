@@ -1,7 +1,7 @@
 #include "hexa_udon/planner/greedy_planner.hpp"
+#include "hexa_udon/core/hex_distance.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <tuple>
@@ -28,29 +28,6 @@ struct Candidate {
   InternalTieBreak tie;
   DailyReadiness readiness;
 };
-
-std::int64_t grid_distance(const core::MapDefinition &map,
-                           const core::CellIndex left,
-                           const core::CellIndex right) {
-  const auto width = static_cast<std::int64_t>(map.width());
-
-  const auto left_value = static_cast<std::int64_t>(left.value);
-  const auto right_value = static_cast<std::int64_t>(right.value);
-
-  const auto left_row = left_value / width;
-  const auto right_row = right_value / width;
-
-  const auto left_col = left_value % width;
-  const auto right_col = right_value % width;
-
-  const auto left_q = left_col - (left_row + (left_row & 1)) / 2;
-  const auto right_q = right_col - (right_row + (right_row & 1)) / 2;
-
-  const auto dq = left_q - right_q;
-  const auto dr = left_row - right_row;
-
-  return (std::llabs(dq) + std::llabs(dr) + std::llabs(dq + dr)) / 2;
-}
 
 [[nodiscard]] simulator::DayActionPlan
 make_plan(const PlannerInput &input, const std::vector<AgentRoute> &routes) {
@@ -181,7 +158,7 @@ daily_readiness(const core::MatchConfig &match, const core::DailyState &daily,
       if (simulation.end_agents[agent].kind != core::AgentKind::Patrol)
         continue;
       const auto distance =
-          grid_distance(match.map, simulation.end_agents[agent].position,
+          core::hex_distance(match.map, simulation.end_agents[agent].position,
                         match.spots[spot].position);
       // Two steps per plain edge is a conservative, future-road-free estimate.
       if (distance * 2 <= simulation.end_agents[agent].fuel)
@@ -202,7 +179,7 @@ daily_readiness(const core::MatchConfig &match, const core::DailyState &daily,
   }
   for (std::size_t first = 0; first < patrols.size(); ++first) {
     for (std::size_t second = first + 1; second < patrols.size(); ++second) {
-      result.patrol_dispersion += grid_distance(
+      result.patrol_dispersion += core::hex_distance(
           match.map, simulation.end_agents[patrols[first]].position,
           simulation.end_agents[patrols[second]].position);
     }
@@ -211,7 +188,7 @@ daily_readiness(const core::MatchConfig &match, const core::DailyState &daily,
     std::int64_t nearest = std::numeric_limits<std::int64_t>::max();
     for (const auto supply : supplies) {
       nearest = std::min(nearest,
-                         grid_distance(match.map,
+                         core::hex_distance(match.map,
                                        simulation.end_agents[patrol].position,
                                        simulation.end_agents[supply].position));
     }

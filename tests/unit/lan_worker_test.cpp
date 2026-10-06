@@ -1,4 +1,5 @@
 #include "hexa_udon/protocol/request_id_digest.hpp"
+#include "hexa_udon/app/lan_worker.hpp"
 
 #include <cassert>
 #include <cstdlib>
@@ -11,6 +12,22 @@ void require(bool condition) {
 }
 
 int main() {
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::time_point{};
+    const auto deadline = start + std::chrono::milliseconds{1000};
+    // The connect, write, and read phases all use the same absolute deadline,
+    // so each phase receives only the time still available at its start.
+    require(hexa_udon::app::remaining_worker_timeout(deadline,
+        start).count() == 1000);
+    require(hexa_udon::app::remaining_worker_timeout(deadline,
+        start + std::chrono::milliseconds{250}).count() == 750);
+    require(hexa_udon::app::remaining_worker_timeout(deadline,
+        start + std::chrono::milliseconds{750}).count() == 250);
+    require(hexa_udon::app::remaining_worker_timeout(deadline,
+        deadline).count() == 0);
+    require(hexa_udon::app::remaining_worker_timeout(deadline,
+        deadline + std::chrono::milliseconds{1}).count() == 0);
+
     using hexa_udon::protocol::request_id_digest_or_missing;
     const auto make_reply = [](int index, const char* termination,
                                const char* strict, const char* adoption) {
