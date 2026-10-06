@@ -1,0 +1,2 @@
+/usr/bin/ar qc libhexa_udon_http.a CMakeFiles/hexa_udon_http.dir/src/protocol/http_transport.cpp.o
+/usr/bin/ranlib libhexa_udon_http.a
