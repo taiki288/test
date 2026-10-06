@@ -45,6 +45,10 @@ struct LanWorkerReply {
     std::chrono::milliseconds timeout,
     std::size_t maximum_frame_bytes = 262144);
 
+[[nodiscard]] std::chrono::milliseconds remaining_worker_timeout(
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::steady_clock::time_point now) noexcept;
+
 int run_lan_worker(const LanWorkerConfig& config,
                    const std::function<bool()>& stop_requested,
                    std::ostream& output);

@@ -1,9 +1,23 @@
 #include "test_fixture.hpp"
+#include "hexa_udon/core/hex_distance.hpp"
 
 #include <cassert>
 
 int main() {
     using namespace hexa_udon;
+    const auto distance_map = std::move(core::MapDefinition::create(8, 8,
+        std::vector<core::Terrain>(64, core::Terrain::Plain)).value());
+    if (core::hex_distance(distance_map, {0}, {0}) != 0) return 1;
+    // Even-row offset: both lower cells are adjacent to (row=0,col=0).
+    if (core::hex_distance(distance_map, {0}, {8}) != 1) return 1;
+    if (core::hex_distance(distance_map, {0}, {9}) != 1) return 1;
+    // Odd-row offset: both upper cells are adjacent to (row=1,col=1).
+    if (core::hex_distance(distance_map, {8}, {0}) != 1) return 1;
+    if (core::hex_distance(distance_map, {9}, {0}) != 1) return 1;
+    if (core::hex_distance(distance_map, {9}, {1}) != 1) return 1;
+    if (core::hex_distance(distance_map, {0}, {16}) != 2) return 1;
+    if (core::hex_distance(distance_map, {0}, {27}) != 4) return 1;
+
     core::MapDefinition map = std::move(core::MapDefinition::create(16, 16,
         std::vector<core::Terrain>(256, core::Terrain::Plain)).value());
     core::MatchConfig match{0, {60}, {100}, map, {},

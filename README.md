@@ -1,186 +1,226 @@
 # hexa-udon
 
-16×16、24×24、32×32のv2 profileに対応するC++20 clientです。WSL/Linuxでの実行を基本とし、練習場と本番は`--base-url`で接続先を分けます。`--execute`を付けた場合だけ提出POSTを有効にします。
+## 1. 概要
 
-主PCが公式API、token、baseline生成、strict Simulatorによる最終検証、提出を担当します。LAN workerは任意の候補計算補助で、timeout、通信失敗、claim mismatch、strict再検証失敗時はbaselineへfallbackします。
+hexa-udonは、16×16、24×24、32×32のv2 profileで日次計画を作成するC++20クライアントです。主PCが公式APIとの通信、baseline生成、strict Simulatorによる再検証、OfficialScoreによる採否、必要なPOSTを担当します。LAN workerは任意の候補計算補助であり、公式API、公式base URL、公式token、提出POSTを扱いません。
 
-## 初期セットアップ
+本番では、GitHubの`main`を共有repo兼提出対象とします。実行時データ、build成果物、Session/log、token、secretはsource treeと分離します。
 
-必要なものはC++20対応コンパイラ、CMake 3.20以上、nlohmann_json 3.11.3以上、libcurlです。CMakeは依存関係をネットワークから取得しません。build directoryは構成ごとに分け、同じdirectoryをDebug/ReleaseやOS間で共用しないでください。
+## 2. 本番チートシート
+
+以下は本番当日の実行順です。URL、token、secretは安全な環境から設定し、READMEやGitへ実値を書きません。`/secure/runtime`は実運用で用意した保護directoryの例です。
+
+### 2.1 環境変数を設定する
 
 ```bash
-# Debug
-cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
-cmake --build build-debug --parallel 4
-
-# Release
-cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
-cmake --build build-release --parallel 4
-
-# CLI確認（通信なし）
-./build-release/hexa_udon --help
+export VENUE_BASE_URL='https://<venue-host>'
+export PROCON_TOKEN='<official-token>'
+export HEXA_LAN_WORKER_SECRET='<worker-only-secret>'
 ```
 
-v2 profileは次の3種類です。`validate-profile`はoffline検証で、tokenやHTTPを必要としません。
+### 2.2 clean Release buildを作る
+
+空の`build-release`を使用し、Debug/Releaseでbuild directoryを共用しません。
+
+```bash
+cmake -S . -B build-release \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build-release --parallel 4
+```
+
+### 2.3 profile、CLI、CTestを確認する
 
 ```bash
 ./build-release/hexa_udon validate-profile --profile config/profiles/16x16-one-supply-v2.json
 ./build-release/hexa_udon validate-profile --profile config/profiles/24x24-two-supply-v2.json
 ./build-release/hexa_udon validate-profile --profile config/profiles/32x32-one-or-three-supply-v2.json
+./build-release/hexa_udon --help
+
+ctest --test-dir build-release -R \
+  'app_unit_tests|lan_worker_unit_tests|daily_deadline_policy_tests|control_tests|protocol_tests|session_tests' \
+  --output-on-failure
 ```
 
-秘密情報は実値をREADMEやGitへ書かず、環境変数から渡します。
+### 2.4 API接続を確認する
 
 ```bash
-export VENUE_BASE_URL='(安全な環境で設定)'
-export PROCON_TOKEN='(安全な環境で設定)'
-export HEXA_LAN_WORKER_SECRET='(公式tokenとは別に安全な環境で設定)'
+./build-release/hexa_udon check \
+  --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
+  --log-dir /secure/runtime/log
 ```
 
-`runtime/`、`results/`、Session、operations log、token、worker secret、build成果物はcommitしません。
+### 2.5 workerを起動する（使用する場合だけ）
 
-## CLIと起動方法
-
-### check
+workerはloopbackまたはprivate LANのaddressで起動します。公式tokenではなく、worker専用secretだけを読みます。
 
 ```bash
-./build-release/hexa_udon check --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN
+./build-release/hexa_udon worker \
+  --listen 127.0.0.1:39001 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET
 ```
 
-`check`は成功/失敗と安全な分類だけを表示し、base URL、host、token、HTTP本文は表示しません。
+### 2.6 dry-runで日次経路を確認する
 
-### auto
-
-通常はdry-runです。dry-runでもGETによる観測は行いますが、競技POSTは行いません。
+`auto`は`--execute`なしではdry-runです。dry-runでもGET観測は行いますが、競技POSTは行いません。
 
 ```bash
 ./build-release/hexa_udon auto \
   --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
   --profile-set v2 --planner daily-improvement \
-  --session-dir /secure/runtime/session --log-dir /secure/runtime/log
+  --lan-worker 127.0.0.1:39001 --lan-worker-timeout-ms 10000 \
+  --session-dir /secure/runtime/session \
+  --log-dir /secure/runtime/log
 ```
 
-`--execute`は明示的に提出POSTを有効にするオプションです。
+### 2.7 executeを明示して本番実行する
 
-```bash
-./build-release/hexa_udon auto \
-  --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
-  --profile-set v2 --planner daily-improvement --execute \
-  --session-dir /secure/runtime/session --log-dir /secure/runtime/log
-```
-
-`--profile FILE`は`auto`または`recover`に渡せます。`--profile-set v2`は`auto`で最初の`GET /setting`から16×16、24×24、32×32のv2 profileを選択します。32×32の供給車allowlistは`[1,3]`です。
-
-### worker
-
-workerは任意の探索補助機能です。主PC単独でも通常のbaseline-first経路を実行できます。workerを使う場合も、workerの失敗、timeout、通信失敗、claim mismatch、strict再検証失敗では、主PCのbaselineまたは既に得られたmain候補へ安全にfallbackします。worker候補を最終採用するかどうかは、常に主PCが決定します。
-
-workerはloopbackまたはprivate LANの明示addressで起動します。worker専用secretは環境変数から渡し、実値はREADMEやGitへ書きません。
-
-```bash
-# loopback例
-export HEXA_LAN_WORKER_SECRET='(安全な環境で設定)'
-./build-release/hexa_udon worker \
-  --listen 127.0.0.1:39001 --worker-token-env HEXA_LAN_WORKER_SECRET
-
-# private LAN例（実際のIP、port、secretは運用環境で設定）
-./build-release/hexa_udon worker \
-  --listen 192.168.1.20:39001 --worker-token-env HEXA_LAN_WORKER_SECRET
-```
-
-主PCからworkerを指定する場合は、`--lan-worker`をrepeatableに指定できます。提出を行う実行例は`--execute`を明示し、SessionとOperationLogはGit外の保護されたdirectoryへ置きます。
+dry-runの結果、profile、types、Session、log、時刻を人手で確認してから`--execute`を付けます。
 
 ```bash
 ./build-release/hexa_udon auto \
   --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
   --profile-set v2 --planner daily-improvement --execute \
   --lan-worker 127.0.0.1:39001 --lan-worker-timeout-ms 10000 \
-  --session-dir /secure/runtime/session --log-dir /secure/runtime/log
+  --session-dir /secure/runtime/session \
+  --log-dir /secure/runtime/log
 ```
 
-private LANでは、主PCから到達できるworker endpointを指定します。
+### 2.8 終了後に状態を確認する
 
 ```bash
-./build-release/hexa_udon auto \
-  --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
-  --profile-set v2 --planner daily-improvement --execute \
-  --lan-worker 192.168.1.20:39001 --lan-worker-timeout-ms 10000 \
-  --session-dir /secure/runtime/session --log-dir /secure/runtime/log
+./build-release/hexa_udon show-state \
+  --session-dir /secure/runtime/session
 ```
 
-workerはbaselineをstrict検証した後の探索補助を担当し、本体Optimizerと共有hard deadline内で並行探索します。worker 0/1は、worker index/count、requestIdDigest、canonical inputHash、planner seed、候補数などのclaim情報を付けて候補を生成します。主PCはreplyのclaimを比較し、input/state/map/profile identity、seed、index/count、候補hashなどを再確認します。
-
-主PCはworker候補をstrict Simulatorで再検証し、OfficialScoreを比較します。OfficialScoreが同等の場合だけDailyReadinessを比較し、最後にdeterministic tie-breakを適用します。timeout、通信失敗、claim mismatch、strict Simulator失敗、deadline不足の候補は採用せず、baselineまたはmain候補へfallbackします。
-
-workerは公式API、公式base URL、公式tokenを扱いません。workerが読むのはworker専用secretだけで、環境変数から渡します。token、secret、URL、HTTP本文、action全配列を通常ログへ出しません。listen addressはloopbackまたはprivate LANに限定し、公開addressや`0.0.0.0`を使用しません。実LANで使う前に、IP、port、firewall、binary version、主PCからの到達性を確認してください。
-
-今後の改善対象は、workerごとの探索範囲、共有hard deadline内のtimeout配分、worker間の役割分担、候補診断とstdout整理です。これらを変更しても、主PCのstrict再検証とbaseline fallbackを維持します。
-
-### recover / show-state
-
-`recover`は保存済みSessionを使う復旧経路で、`--execute`なしではdry-runです。POST後の応答不明状態はRecoveryRequiredとなり、自動再送しません。
+必要な場合だけ、まずdry-runの`recover`でSessionを確認します。公式状態を人手で照合し、再実行が必要と判断した場合に限り`--execute`を明示します。POST結果不明後の自動再送はしません。
 
 ```bash
 ./build-release/hexa_udon recover \
   --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
-  --session-dir /secure/runtime/session --log-dir /secure/runtime/log
-
-./build-release/hexa_udon show-state --session-dir /secure/runtime/session
+  --session-dir /secure/runtime/session \
+  --log-dir /secure/runtime/log
 ```
 
-## アルゴリズム実装場所
+### 2.9 異常時の停止点
 
-| 領域 | 主な実装 |
-| --- | --- |
-| API sequence、日次実行、候補採否 | `src/app/auto_client.cpp` |
-| deadline、baseline、worker handoff、fallback | `src/optimizer/daily_deadline_policy.cpp` |
-| OfficialScore、探索、近傍受理 | `src/optimizer/optimizer.cpp` |
-| baselineのGreedy planner | `src/planner/greedy_planner.cpp` |
-| 補給・rendezvous planner | `src/planner/refuel_planner.cpp` |
-| 六角形経路・距離 | `src/pathfinding/` |
-| 行動妥当性と結果の単一判定源 | `src/simulator/` |
-| LAN workerのrequest/reply | `src/app/lan_worker.cpp` |
-| HTTP、rate limit、Retry-After、request control | `src/protocol/` |
-| Session、Recovery、polling、永続化 | `src/session/` |
+- workerのtimeout、transport failure、claim mismatch、strict failureは、そのworkerだけを失敗扱いにします。他workerとmainの処理は継続し、採用不能ならbaselineへfallbackします。
+- 403/429は安全な分類、`Retry-After`、bounded backoff、deadlineをOperationLogで確認します。deadlineを越える再試行や新規GET/POSTは開始しません。
+- POST前のtimeoutは`submissionAttempted=false`です。POST後に応答が不明なら`null`となり、`RecoveryRequired`で停止します。公式状態を確認するまで再送しません。
+- `RecoveryRequired`、claim mismatch、strict failure、deadline不足は本番の停止・人手確認が必要な警告です。
 
-## 採用判定の流れ
+### 2.10 Session/logを確認する
 
-```text
-baseline生成・strict検証
-  → 本体Optimizerとworker 0/1を並行探索
-  → 主PCでclaim比較・strict Simulator再検証
-  → OfficialScore（辞書順）
-  → 同点時DailyReadiness
-  → deterministic tie-break
-  → 採用、またはbaseline-retained
-```
+終了後は`show-state`と保護されたSession/log directoryを確認し、最終score、candidateSource、adoption結果、POST結果、RecoveryRequiredの有無を記録します。Session/logを提出物やGitへコピーしません。
 
-policy層は候補生成、実行順、deadline、timeout/fallback、strict検証済み候補の返却を担当します。App層はworker claimの再検証、主PCstrict結果の確認、OfficialScore/Readiness比較、最終採用を担当します。
+## 3. 初期セットアップ
 
-## 重要な安全契約
+必要なものはC++20対応コンパイラ、CMake 3.20以上、nlohmann_json 3.11.3以上、libcurlです。CMakeは依存関係をネットワークから取得しません。`runtime/`、`results/`、build成果物、Session/log、token、secretはGit管理対象外です。
 
-- `hardPlanningDeadline = endsAt - 10秒`。最後の10秒は提出前の通信・安全余裕です。
-- `send_at >= deadline`ではGET/POSTを開始しません。deadline後に新しいstrict検証も開始しません。
-- policyのreserveは改善開始可否、fallback、診断に使いますが、hard deadlineから二重減算しません。
-- worker候補は主PCでinput、state、map/profile identity、termination、score、readinessを再検証します。
-- claim mismatch、timeout、transport/protocol failure、strict Simulator失敗の候補は採用しません。
-- `submissionAttempted`は`false`（POST前）、`true`（POST後2xx）、`null`（POST後の不明結果）の三値です。
-- `null`はRecoveryRequiredとして保存し、自動再送しません。`false`はPOST前停止でありRecoveryRequiredではありません。
-- 通常ログへtoken、URL、HTTP本文、action配列、worker secretを保存しません。
+環境変数は次の役割に分かれます。
 
-API経路は初回`GET /setting`、`POST /agent`（type提出）、type提出後の日次`GET /`、日次`POST /`です。403/429、Retry-After、bounded backoff、polling limit、deadline停止はOperationLogへ安全な分類と数値で記録します。初回settingを日次pollingで再取得しないため、`/setting` stormを作りません。
+- `VENUE_BASE_URL`: 主PCが接続する公式または練習場のbase URL。
+- `PROCON_TOKEN`: 主PCだけが読む公式token。
+- `HEXA_LAN_WORKER_SECRET`: worker protocol専用secret。公式tokenとは別物です。
 
-## テスト
+## 4. ビルド
+
+構成ごとに専用directoryを使用します。Debug、Release、Sanitizerの設定確認はできますが、本番当日はcleanな`build-release`から実行します。
 
 ```bash
-ctest --test-dir build-debug --output-on-failure
-ctest --test-dir build-release --output-on-failure
+cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build-debug --parallel 4
 
-# 関連6件だけ
-ctest --test-dir build-debug -R \
-  'app_unit_tests|lan_worker_unit_tests|daily_deadline_policy_tests|control_tests|protocol_tests|session_tests' \
-  --output-on-failure
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build-release --parallel 4
 ```
+
+## 5. CLIリファレンス
+
+共通の接続系コマンドは`--base-url URL`、`--token-env NAME`、`--session-dir DIR`、`--log-dir DIR`、`--poll-ms N`、`--connect-timeout-ms N`、`--total-timeout-ms N`、`--safety-seconds N`、`--max-get-retries N`、`--log-level info|warning|error`を使用します。既定のSession/log directoryはそれぞれ`run/session`、`run/log`です。本番では保護された外部directoryを明示してください。
+
+### コマンド
+
+- `check --base-url URL`: API接続と安全な応答分類を確認します。
+- `auto --base-url URL`: 日次計画を実行します。`--execute`がある場合だけPOSTします。
+- `recover --base-url URL`: 保存Sessionから復旧確認を行います。`--execute`なしがdry-runです。
+- `show-state --session-dir DIR`: Sessionの最後の状態を表示します。`--execute`は使用しません。
+- `validate-profile --profile FILE`: 通信なしでprofileを検証します。
+- `worker --listen HOST:PORT --worker-token-env NAME`: worker serverを起動します。
+
+### 計画・profile・worker option
+
+`auto`と`recover`では`--planner wait|greedy|greedy-refuel|optimized|daily-improvement`、`--planner-ms N`、`--planner-candidates N`、`--seed N`、`--refuel-ms N`、`--refuel-candidates N`、`--rendezvous-candidates N`、`--max-refuels N`、`--daily-deadline-policy NAME`を使用できます。Optimizerには`--optimizer-ms N`と`--optimizer-iterations N`があります。
+
+`auto`では`--profile-set v2`または`--profile FILE`を選択します。`--profile-set v2`は最初の`GET /setting`からprofileを選択し、`--profile FILE`は明示profileを使用します。profile指定時はtuning overrideを併用せず、`--types`だけを許可します。`--types 0,0,0,1`は明示type指定の例です。
+
+type selectorは`--type-selector fixed|prematch`、`--type-selector-ms N`、`--type-selector-max-supply 0|1|2`、`--type-selector-min-supply 0|1|2`です。
+
+`auto`だけで`--lan-worker HOST:PORT`を繰り返し指定でき、`--lan-worker-timeout-ms N`でworkerの上限を指定します。LAN workerは`daily-improvement`経路の候補計算補助です。
+
+`--log-level info`は通常診断、`warning`はwarning/error、`error`はerrorだけを出力します。stdoutの詳細量を増やすための隠れたログ optionはありません。
+
+## 6. profile
+
+| profile | 盤面 | agent | supply allowlist | baseline / improvement deadline |
+| --- | ---: | ---: | --- | --- |
+| `config/profiles/16x16-one-supply-v2.json` | 16×16 | 4 | `[1]` | 1000ms / 10000ms |
+| `config/profiles/24x24-two-supply-v2.json` | 24×24 | 5 | `[2]` | 2000ms / 20000ms |
+| `config/profiles/32x32-one-or-three-supply-v2.json` | 32×32 | 7 | `[1,3]` | 5000ms / 30000ms |
+
+全profileは`daily-improvement`、共有hard deadline、POST前の安全余裕を持ちます。profileのallowlist、盤面、agent数、deadline、reserve、minimum improvementはJSONを正とし、実行前に`validate-profile`で確認します。
+
+## 7. 日次アルゴリズム
+
+採用フローは次の順序です。
+
+```text
+baseline生成
+  → main Optimizer / worker並行探索
+  → claim確認
+  → strict Simulator再検証
+  → OfficialScore
+  → DailyReadiness
+  → deterministic tie-break
+  → 採用またはbaseline fallback
+  → POST
+```
+
+- baseline-firstでGreedy/Refuel baselineを生成し、strict Simulatorで先に検証します。
+- GreedyとOptimizerは、募集要項の「偶数行が右にずれる」座標系に対応する共通距離helperを使用します。既存のfuel判定、axial座標修正、strict Simulator、OfficialScore、DailyReadiness、deterministic tie-breakを同じ契約で維持します。
+- fuel判定、axial座標距離、Greedy planner、Refuel planner、AddUncollectedBrand、OfficialScore、DailyReadiness、type selectorは、profileと現在のstateを入力に決定的に評価します。
+- worker replyはrequestIdDigest、input/state/map/profile identity、seed、index/countなどのclaimを主PCが確認し、strict Simulatorで再検証してから比較します。
+- OfficialScore、DailyReadiness、deterministic tie-breakの順で採否を決めます。不正、timeout、claim mismatch、deadline超過、strict failureは採用せず、baselineまたはmain候補へfallbackします。
+- `hardPlanningDeadline`は日次終了時刻から安全余裕を引いた境界です。`send_at >= deadline`では新しいstrict検証、GET、POSTを開始しません。
+
+## 8. LAN worker運用
+
+workerは任意機能です。workerを起動しなくてもmainのbaseline-first経路は成立します。workerは公式API、公式base URL、公式tokenを扱わず、worker専用secretだけでloopbackまたはprivate LANのrequest/replyを受けます。公開addressや`0.0.0.0`をlisten endpointにしません。
+
+worker通信timeoutは`steady_clock`の絶対deadline方式です。worker処理開始時に作ったdeadlineから、connect、write、readの各操作直前に残り時間を再計算し、その残り時間だけをtimeoutとして渡します。残り時間が0以下なら次の通信操作を開始しません。deadline後のI/Oは開始しません。
+
+timeoutしたworker、transport failure、claim mismatch、strict failureは、そのworkerだけを失敗扱いにします。他workerとmainの処理は継続し、候補が採用できなければbaseline/mainへfallbackします。`hardPlanningDeadline`、reply grace、`workerElapsedMs`、`mainElapsedMs`は日次の安全契約と診断に使用します。
+
+実LAN、worker firewall、実API、実tokenでの相互運用は未検証です。loopback fixtureの成功を本番LAN完走の根拠にしません。
+
+## 9. ログとSession
+
+### stdoutに表示されるもの
+
+stdoutは人間向けの簡潔な表示に限定します。起動モード、type選択完了、日次開始・終了、最終score、`candidateSource`、adoption結果、POST成功・失敗、timeout・claim mismatch・strict failure・`RecoveryRequired`など対応が必要な警告、最終終了状態を表示します。
+
+workerごとのrequestIdDigest、inputHash、seed、worker index/count、candidate count、score/readiness digest、strict再検証詳細、rejection reason、elapsed time詳細、planner途中経過、rendezvous詳細、候補列挙はstdoutに出しません。
+
+### OperationLog/Sessionに保存される診断
+
+OperationLogとSession診断には、必要な範囲でrequest/response分類、Retry-After、bounded backoff、deadline、workerのdigest/hash/seed/index/count/candidate情報、score/readiness、strict結果、claim確認、`candidateSource`、`adoptionReason`、`workerElapsedMs`、`mainElapsedMs`を保存します。Sessionは復旧契約に必要な状態・receiptを保持するため、Git外の保護directoryで管理し、提出物へ含めません。
+
+token、worker secret、HTTP本文、秘匿URL、認証情報、action全配列はstdoutやOperationLogへ保存・出力しません。Session/logを共有するときも秘密情報を含めないことを人手で確認します。
+
+### RecoveryRequiredと自動再送
+
+`submissionAttempted`は、POST前の`false`、POST応答を受理した`true`、POST後に結果が不明な`null`の三値です。`null`は公式側の受理状態を推測できないため`RecoveryRequired`となります。`show-state`、Session、公式状態を人手で照合し、同一状態を確認した上でのみ、明示的な`recover --execute`を検討します。同一POSTの複数回自動送信は契約上行いません。
+
+## 10. テスト
 
 CTestには次の6件が登録されています。
 
@@ -191,34 +231,39 @@ CTestには次の6件が登録されています。
 - `protocol_tests`
 - `session_tests`
 
-ASan/UBSanは専用build directoryで構成します。loopback workerはsanitizerや低速環境でtimeoutし得るため、機能失敗と環境由来のtimeoutを分けて報告します。
-
 ```bash
-cmake -S . -B ../30013-build-asan \
-  -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
-  -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
-  -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
-cmake --build ../30013-build-asan --parallel 4
-ctest --test-dir ../30013-build-asan --output-on-failure
+ctest --test-dir build-release -R \
+  'app_unit_tests|lan_worker_unit_tests|daily_deadline_policy_tests|control_tests|protocol_tests|session_tests' \
+  --output-on-failure
 ```
 
-```bash
-git diff --check
-```
+開発時はDebug専用directoryで同じCTestを実行し、Sanitizerも専用directoryに分離します。距離fixtureは偶数行・奇数行の隣接、同一セル、複数行距離を、worker fixtureはconnect/write/readごとの残り時間短縮、deadline後I/O禁止、片worker timeout時の他worker継続、baseline fallbackを確認します。stdout fixtureは詳細診断のstdout漏出がなく、最終状態と対応警告が残ることを確認します。
 
-## GitHub mainと提出物の運用
+## 11. 提出・運用ルール
 
-GitHub mainは共有repoであり、そのsource treeを現行の提出対象として扱います。実行・提出前は、GitHub mainの`src/`、`include/`、`config/profiles/`、CMake定義、必要なdocsからclean buildを作ります。
+GitHubの`main`は共有repo兼提出対象です。提出前は`src/`、`include/`、`config/profiles/`、CMake定義、必要なdocsからclean buildを作ります。提出対象にruntime、results、build成果物、Session/log、token、secretを含めません。
 
-旧package manifest、allowlist hash、source commit metadataは現行実行系・提出経路では使用しません。package専用manifestを前提にした旧production package運用は廃止します。
+旧PACKAGE-MANIFEST、旧package生成手順、allowlist hash、source commit metadata、`~/30013-submit`は現行の実行・提出手順では使用しません。旧package工程は現行mainの提出経路の根拠にしません。
 
-提出対象にはruntime、results、build成果物、Session/log、token、worker secretなどの実行時データや秘密情報を含めません。`runtime/`と`results/`はGitHub mainおよび提出物から分離します。
+## 12. アルゴリズム実装場所
 
-`~/30013-submit`は旧production package工程の成果物であり、現行のGitHub main提出経路では使用しません。現行mainを直接確認し、sourceからclean buildして提出前検証を行います。
+| 領域 | 主な実装 |
+| --- | --- |
+| API sequence、日次実行、候補採否 | `src/app/auto_client.cpp` |
+| deadline、baseline、worker handoff、fallback | `src/optimizer/daily_deadline_policy.cpp` |
+| OfficialScore、探索、距離helper利用 | `src/optimizer/optimizer.cpp` |
+| baselineのGreedy planner、距離helper利用 | `src/planner/greedy_planner.cpp` |
+| 補給・rendezvous planner | `src/planner/refuel_planner.cpp` |
+| 共通の偶数行右ずれ六角形距離 | `include/hexa_udon/core/hex_distance.hpp` |
+| 行動妥当性と結果の単一判定源 | `src/simulator/` |
+| LAN workerのrequest/reply | `src/app/lan_worker.cpp` |
+| HTTP、rate limit、Retry-After、request control | `src/protocol/` |
+| Session、Recovery、polling、永続化 | `src/session/` |
 
-## 関連文書
+## 13. 未検証事項・制約
 
-- [運用手順](docs/operations.md)
-- [LAN worker運用](docs/lan-worker.md)
-- [Recovery](docs/recovery.md)
-- [安全契約](docs/safety.md)
+- 実LAN、実API、実token、競技POSTは未検証です。loopback、fixture、ローカルbuildの結果から本番完走を推定しません。
+- workerが利用できない場合はmain単独のbaseline-first経路へ戻ります。workerは本番必須ではありません。
+- type選択後に403となる場合、既存の安全な分類、Retry-After、bounded backoff、deadline停止に従います。複数回POSTの自動再送は未実装で、結果不明はRecoveryRequiredです。
+- stdout過多、type選択後の403/backoff、複数回POST未実装は、現在の安全停止契約を壊さない範囲での残課題です。前二者は運用監視上の本番前推奨、複数回POSTは将来改善として扱います。
+- 詳細な運用境界は[運用手順](docs/operations.md)、[LAN worker運用](docs/lan-worker.md)、[安全契約](docs/safety.md)、[Recovery](docs/recovery.md)、[phase制約](docs/phase-constraints.md)、[phase status](docs/phase-status.md)を参照します。
