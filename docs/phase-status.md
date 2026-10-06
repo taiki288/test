@@ -12,7 +12,7 @@ workerは公式APIや公式tokenを扱わず、requestIdDigestを主PCと共通�
 - 同一POSTの複数回自動送信は未実装。unknown後の自動再送は禁止。
 - GitHub mainを共有repo兼提出対象とし、実行・提出前はsourceからclean buildを作る。
 - package専用manifestは現行実行系・提出経路では使用しない。`~/30013-submit`は旧production package工程であり、現行提出経路では使用しない。
-- stdoutの整理、type選択後の403/backoff/timeout時系列診断は後続課題。
+- stdoutは人間向けの簡潔な状態・進捗表示とし、詳細診断はOperationLog/Sessionへ保存する。type選択後の403/backoff/timeout時系列も診断情報として保存する。
 - tuning、dashboard、replay、runtime、resultsはproduction sourceと分離する。
 
 ## 今回のphaseの成果物整理
@@ -22,6 +22,4 @@ Git生成物は`.gitignore`で除外し、tracked build成果物はGit管理か�
 ## 次の工程
 
 1. GitHub mainからclean buildを作り、提出前のCLI・profile・CTest確認を行う。
-2. stdoutを最小化し、診断情報をOperationLogへ集約する。
-3. type選択後から最初の日次GETまでの通信時系列を診断可能にする。
-4. 実LAN・実APIの扱いは、別途明示承認と安全な検証計画が整った場合だけ判断する。
+2. 実LAN・実APIの扱いは、別途明示承認と安全な検証計画が整った場合だけ判断する。

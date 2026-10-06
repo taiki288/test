@@ -57,7 +57,7 @@ Session/logにpolicy/profile identity、configured上限とclamp後stage上限�
 base URLは運営から受け取った非秘密の`VENUE_BASE_URL`、tokenは安全に入力した`PROCON_TOKEN`を環境に用意します。以下は接続を伴う参考手順で、package検証では実行しません。
 
 ```bash
-../30013-prod-build/hexa_udon auto --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
+./build-release/hexa_udon auto --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
   --profile config/profiles/32x32-one-or-three-supply-v2.json \
   --session-dir /secure/runtime/match-session --log-dir /secure/runtime/match-log
 ```
