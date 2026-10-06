@@ -6,12 +6,14 @@
 #include "hexa_udon/optimizer/daily_deadline_policy.hpp"
 #include "hexa_udon/app/production_profile.hpp"
 #include "hexa_udon/protocol/json_codec.hpp"
+#include "hexa_udon/protocol/request_id_digest.hpp"
 
 #include <algorithm>
 #include <charconv>
 #include <iostream>
 #include <iomanip>
 #include <limits>
+#include <future>
 #include <sstream>
 #include <thread>
 
@@ -1081,6 +1083,41 @@ RunResult AutoCompetitionClient::run() {
                         const char* secret = std::getenv(config_.lan_worker_secret_environment.c_str());
                         if (secret == nullptr || *secret == '\0') return result;
                         nlohmann::json worker_observations = nlohmann::json::array();
+                        struct PendingWorkerReply {
+                            std::future<LanWorkerReply> reply;
+                            protocol::SteadyTime dispatched_at;
+                        };
+                        std::vector<PendingWorkerReply> pending_replies;
+                        pending_replies.reserve(config_.lan_workers.size());
+                        const std::string worker_secret{secret};
+                        for (std::size_t worker_index = 0; worker_index < config_.lan_workers.size(); ++worker_index) {
+                            auto pending_request = request;
+                            pending_request["workerIndex"] = worker_index;
+                            pending_request["workerCount"] = config_.lan_workers.size();
+                            const auto worker_seed = config_.planner_seed + static_cast<std::uint64_t>(worker_index);
+                            pending_request["plannerInput"]["plannerSeed"] = worker_seed;
+                            pending_request["payloadHash"] = canonical_json_hash(pending_request["plannerInput"]);
+                            const auto endpoint = config_.lan_workers[worker_index];
+                            const auto dispatched_at = worker_now();
+                            const auto remaining = hard_deadline - dispatched_at;
+                            const auto timeout = std::min(
+                                effective_timeout,
+                                std::max(std::chrono::milliseconds{0},
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(remaining)));
+                            if (timeout.count() <= 0) {
+                                pending_replies.push_back({
+                                    std::async(std::launch::deferred, [] {
+                                        return LanWorkerReply{false, {}, "worker reply timeout"};
+                                    }), dispatched_at});
+                            } else {
+                                pending_replies.push_back({
+                                    std::async(std::launch::async,
+                                        [endpoint, worker_secret, pending_request, timeout] {
+                                            return request_lan_worker(endpoint, worker_secret,
+                                                pending_request, timeout);
+                                        }), dispatched_at});
+                            }
+                        }
                         for (std::size_t worker_index = 0; worker_index < config_.lan_workers.size(); ++worker_index) {
                             auto worker_request = request;
                             worker_request["workerIndex"] = worker_index;
@@ -1093,10 +1130,17 @@ RunResult AutoCompetitionClient::run() {
                             result.record["workerEndpointDigest"] = endpoint_digest;
                             result.record["workerIndex"] = worker_index;
                             result.record["workerSeed"] = worker_seed;
-                            const auto worker_started = worker_now();
+                            const auto worker_started = pending_replies[worker_index].dispatched_at;
                             std::string observation_termination = "timeout";
                             std::string observation_claim = "timeout";
                             std::string observation_adoption = "baseline-retained";
+                            std::string observation_rejection_reason;
+                            std::string observation_comparison = "not-evaluated";
+                            std::string observation_strict_revalidation = "not-started";
+                            nlohmann::json observation_mismatch_fields = nlohmann::json::array();
+                            std::int64_t observation_candidate_count = 0;
+                            std::string observation_score_digest = "missing";
+                            std::string observation_readiness_digest = "missing";
                             struct WorkerLogGuard {
                                 std::function<void()> emit;
                                 ~WorkerLogGuard() { emit(); }
@@ -1104,28 +1148,27 @@ RunResult AutoCompetitionClient::run() {
                                 const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(worker_now() - worker_started).count();
                                 worker_observations.push_back({
                                     {"workerIndex", worker_index}, {"workerCount", config_.lan_workers.size()},
-                                    {"requestIdDigest", canonical_json_hash(worker_request.at("requestId"))},
+                                    {"requestIdDigest", protocol::request_id_digest_or_missing(worker_request.at("requestId"))},
+                                    {"inputHash", worker_request.value("payloadHash", "missing")},
+                                    {"plannerSeed", worker_request["plannerInput"].value("plannerSeed", std::uint64_t{0})},
+                                    {"candidateCount", observation_candidate_count},
+                                    {"scoreDigest", observation_score_digest},
+                                    {"readinessDigest", observation_readiness_digest},
                                     {"elapsedMs", elapsed_ms}, {"termination", observation_termination},
-                                    {"claim", observation_claim}, {"adoption", observation_adoption}});
+                                    {"claim", observation_claim}, {"strictRevalidation", observation_strict_revalidation},
+                                    {"rejectionReason", observation_rejection_reason},
+                                    {"comparison", observation_comparison},
+                                    {"claimMismatchFields", observation_mismatch_fields},
+                                    {"adoption", observation_adoption}});
                                 output_ << "lan-worker-result workerIndex=" << worker_index
                                         << " workerCount=" << config_.lan_workers.size()
-                                        << " requestIdDigest=" << canonical_json_hash(worker_request.at("requestId"))
+                                        << " requestIdDigest=" << protocol::request_id_digest_or_missing(worker_request.at("requestId"))
                                         << " elapsedMs=" << elapsed_ms
                                         << " termination=" << observation_termination
                                         << " claim=" << observation_claim
                                         << " adoption=" << observation_adoption << '\n';
                             }};
-                            const auto remaining = hard_deadline - worker_now();
-                            const auto reply_timeout = std::min(
-                                effective_timeout,
-                                std::chrono::duration_cast<std::chrono::milliseconds>(remaining));
-                            if (reply_timeout.count() <= 0) {
-                                result.reason = "worker-timeout";
-                                result.record["workerTermination"] = "timeout";
-                                result.record["mainRevalidationTermination"] = "deadline_exhausted";
-                                break;
-                            }
-                            const auto reply = request_lan_worker(endpoint, secret, worker_request, reply_timeout);
+                            const auto reply = pending_replies[worker_index].reply.get();
                             if (!reply.success) {
                                 const auto failure_termination = reply.error.find("timeout") != std::string::npos
                                     ? std::string{"timeout"} : std::string{"planner_failure"};
@@ -1137,16 +1180,26 @@ RunResult AutoCompetitionClient::run() {
                                 result.record["mainRevalidationTermination"] = main_failure_termination;
                                 observation_termination = failure_termination;
                                 observation_claim = failure_termination == "timeout" ? "timeout" : "mismatch";
+                                observation_rejection_reason = failure_termination == "timeout"
+                                    ? "timeout" : "transport-failure";
                                 result.reason = reply.error.empty() ? "worker-failure" : reply.error;
                                 continue;
                             }
                             try {
                                 const auto worker_termination = reply.payload.value("termination", "");
                                 observation_termination = worker_termination;
+                                observation_candidate_count = reply.payload.value("evaluatedCandidates", 0);
+                                observation_score_digest = canonical_json_hash(reply.payload.value("officialScore", nlohmann::json(nullptr)));
+                                observation_readiness_digest = canonical_json_hash(reply.payload.value("readiness", nlohmann::json(nullptr)));
                                 simulator::RawDayActionPlan raw;
                                 for (const auto& row : reply.payload.at("actions")) raw.push_back(row.get<std::vector<std::int32_t>>());
                                 const auto parsed = simulator::parse_action_plan(raw);
-                                if (!parsed) { observation_claim = "mismatch"; result.reason = "candidate-action-invalid"; continue; }
+                                if (!parsed) {
+                                    observation_claim = "mismatch";
+                                    observation_rejection_reason = "protocol-failure";
+                                    result.reason = "candidate-action-invalid";
+                                    continue;
+                                }
                                 const simulator::DaySimulationInput sim_input{
                                     setting.value().map, setting.value().spots, setting.value().fuel_limit,
                                     setting.value().day_steps.at(static_cast<std::size_t>(daily.value().day)),
@@ -1158,11 +1211,19 @@ RunResult AutoCompetitionClient::run() {
                                     result.record["mainRevalidationTermination"] = best_candidate.has_value()
                                         ? "deadline_exhausted_best_available" : "deadline_exhausted";
                                     observation_claim = "mismatch";
+                                    observation_rejection_reason = "deadline-exhausted";
                                     result.reason = "candidate-unverified-deadline";
                                     continue;
                                 }
                                 const auto simulation = simulator::simulate_day(sim_input, parsed.value());
-                                if (!simulation) { observation_claim = "mismatch"; result.reason = "candidate-simulator-rejected"; continue; }
+                                if (!simulation) {
+                                    observation_claim = "mismatch";
+                                    observation_strict_revalidation = "failed";
+                                    observation_rejection_reason = "strict-revalidation-failed";
+                                    result.reason = "candidate-simulator-rejected";
+                                    continue;
+                                }
+                                observation_strict_revalidation = "passed";
                                 const bool strict_verified_before_deadline = worker_now() < hard_deadline;
                                 std::vector<std::vector<std::size_t>> visited(simulation.value().acquisitions.size());
                                 for (std::size_t i = 0; i < visited.size(); ++i) visited[i] = simulation.value().acquisitions[i].spot_indices;
@@ -1207,9 +1268,13 @@ RunResult AutoCompetitionClient::run() {
                                     result.reason = worker_termination == "deadline_exhausted"
                                         ? "candidate-unverified-deadline" : "candidate-termination-invalid";
                                     observation_claim = "mismatch";
+                                    observation_rejection_reason = worker_termination == "deadline_exhausted"
+                                        ? "deadline-exhausted" : "termination-invalid";
                                     continue;
                                 }
-                                compare("requestId", worker_request.at("requestId"), reply.payload.value("requestId", nlohmann::json(nullptr)));
+                                compare("requestIdDigest",
+                                        nlohmann::json{protocol::request_id_digest_or_missing(worker_request.at("requestId"))},
+                                        nlohmann::json{reply.payload.value("requestIdDigest", "missing")});
                                 compare("inputHash", worker_request.at("payloadHash"), reply.payload.value("inputHash", nlohmann::json(nullptr)));
                                 compare("evaluatorVersion", worker_request.at("evaluatorVersion"), reply.payload.value("evaluatorVersion", nlohmann::json(nullptr)));
                                 compare("profileIdentity", worker_request.at("policyIdentity"), reply.payload.value("policyIdentity", nlohmann::json(nullptr)));
@@ -1230,8 +1295,10 @@ RunResult AutoCompetitionClient::run() {
                                         reply.payload.value("bestCandidateStrictVerified", nlohmann::json(nullptr)));
                                 if (!mismatches.empty()) {
                                     observation_claim = "mismatch";
+                                    observation_rejection_reason = "claim-mismatch";
+                                    observation_mismatch_fields = mismatches;
                                     worker_claim_mismatch = true;
-                                    result.record["lanWorkerClaimDiagnostics"] = {{"workerEndpointDigest", endpoint_digest}, {"schemaVersion", reply.payload.value("protocolVersion", 0)}, {"evaluatorVersion", reply.payload.value("evaluatorVersion", "")}, {"requestIdDigest", canonical_json_hash(worker_request.at("requestId"))}, {"fields", std::move(mismatches)}, {"workerTermination", worker_termination}, {"mainRevalidationTermination", main_revalidation_termination}, {"mainRevalidationFailureReason", ""}, {"fallback", "baseline-retained"}};
+                                    result.record["lanWorkerClaimDiagnostics"] = {{"workerEndpointDigest", endpoint_digest}, {"schemaVersion", reply.payload.value("protocolVersion", 0)}, {"evaluatorVersion", reply.payload.value("evaluatorVersion", "")}, {"requestIdDigest", protocol::request_id_digest_or_missing(worker_request.at("requestId"))}, {"fields", std::move(mismatches)}, {"workerTermination", worker_termination}, {"mainRevalidationTermination", main_revalidation_termination}, {"mainRevalidationFailureReason", ""}, {"fallback", "baseline-retained"}};
                                     result.reason = "candidate-claims-mismatch"; continue;
                                 }
                                 const bool better = score_better;
@@ -1244,6 +1311,11 @@ RunResult AutoCompetitionClient::run() {
                                 const bool candidate_better = better || tie_better;
                                 observation_claim = "accepted";
                                 observation_adoption = candidate_better ? "worker" : "baseline-retained";
+                                observation_comparison = better ? "official-score-improved"
+                                    : tie_better ? "readiness-tie-break"
+                                    : candidate_score == baseline_score ? "readiness-lost" : "score-lost";
+                                if (!candidate_better)
+                                    observation_rejection_reason = observation_comparison;
                                 if (candidate_better) {
                                     const bool deterministic_better = !best_candidate
                                         || planner::better_official_score(candidate_score, best_candidate->score)
@@ -1258,6 +1330,8 @@ RunResult AutoCompetitionClient::run() {
                                             action_hash, plan_hash, end_hash, worker_index};
                                     }
                                     result.reason = "baseline-retained-lower-or-equal-candidate";
+                                    result.record["workerAdoptionReason"] = score_better
+                                        ? "official-score-improved" : "readiness-tie-break";
                                 }
                             } catch (...) { observation_claim = "mismatch"; result.reason = "candidate-response-schema-invalid"; }
                         }

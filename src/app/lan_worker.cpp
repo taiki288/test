@@ -1,6 +1,7 @@
 #include "hexa_udon/app/lan_worker.hpp"
 #include "hexa_udon/optimizer/daily_deadline_policy.hpp"
 #include "hexa_udon/protocol/json_codec.hpp"
+#include "hexa_udon/protocol/request_id_digest.hpp"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -296,14 +297,15 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
         if (client < 0) continue;
         const auto line = read_line(client, config.maximum_frame_bytes);
         nlohmann::json reply;
+        nlohmann::json request = nlohmann::json::object();
         if (!line) reply = response_failure("malformed-or-oversized-request");
         else try {
-            const auto request = nlohmann::json::parse(*line);
+            request = nlohmann::json::parse(*line);
             const auto planner_input_json = request.value("plannerInput", nlohmann::json::object());
             output << "worker-event phase=received workerIndex="
                    << request.value("workerIndex", config.worker_index)
                    << " workerCount=" << request.value("workerCount", config.worker_count)
-                   << " requestIdDigest=" << hex_digest(request.value("requestId", ""))
+                   << " requestIdDigest=" << protocol::request_id_digest_or_missing(request.value("requestId", nlohmann::json(nullptr)))
                    << " inputHash=" << request.value("payloadHash", "")
                    << " seed=" << planner_input_json.value("plannerSeed", std::uint64_t{0}) << '\n';
             static const std::set<std::string> allowed_request{
@@ -333,6 +335,8 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                         || request.value("futureSnapshotRead", true)
                         || request.value("lookahead", 1) != 0) {
                         reply = response_failure("planner-input-identity-mismatch");
+                        reply["requestIdDigest"] = protocol::request_id_digest_or_missing(
+                            request.value("requestId", nlohmann::json(nullptr)));
                         const auto encoded = reply.dump() + "\n";
                         static_cast<void>(write_all(client, encoded));
                         ::close(client);
@@ -399,6 +403,7 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                                     }();
                                     reply = {{"protocolVersion", protocol_version}, {"success", true},
                                              {"requestId", request.value("requestId", "")},
+                                             {"requestIdDigest", protocol::request_id_digest_or_missing(request.value("requestId", nlohmann::json(nullptr)))},
                                              {"evaluatorVersion", request.value("evaluatorVersion", "")},
                                              {"policyIdentity", request.value("policyIdentity", nlohmann::json(nullptr))},
                                              {"mapIdentity", map_identity_digest(decoded->match.map)},
@@ -440,11 +445,16 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                 }
             }
         } catch (...) { reply = response_failure("malformed-json"); }
+        if (request.contains("requestId")) {
+            reply["requestIdDigest"] = protocol::request_id_digest_or_missing(request.at("requestId"));
+        } else {
+            reply["requestIdDigest"] = "missing";
+        }
         const auto encoded = reply.dump() + "\n";
         static_cast<void>(write_all(client, encoded));
         output << "worker-event phase=reply workerIndex="
                << reply.value("workerIndex", config.worker_index)
-               << " requestIdDigest=" << hex_digest(reply.value("requestId", ""))
+               << " requestIdDigest=" << reply.value("requestIdDigest", "missing")
                << " replySent=true\n";
         ::close(client);
     }
