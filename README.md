@@ -10,23 +10,23 @@
 
 ```bash
 # Debug
-cmake -S . -B ../30013-build-debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
-cmake --build ../30013-build-debug --parallel 4
+cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build-debug --parallel 4
 
 # Release
-cmake -S . -B ../30013-build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
-cmake --build ../30013-build-release --parallel 4
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build-release --parallel 4
 
 # CLI確認（通信なし）
-../30013-build-release/hexa_udon --help
+./build-release/hexa_udon --help
 ```
 
 v2 profileは次の3種類です。`validate-profile`はoffline検証で、tokenやHTTPを必要としません。
 
 ```bash
-../30013-build-release/hexa_udon validate-profile --profile config/profiles/16x16-one-supply-v2.json
-../30013-build-release/hexa_udon validate-profile --profile config/profiles/24x24-two-supply-v2.json
-../30013-build-release/hexa_udon validate-profile --profile config/profiles/32x32-one-or-three-supply-v2.json
+./build-release/hexa_udon validate-profile --profile config/profiles/16x16-one-supply-v2.json
+./build-release/hexa_udon validate-profile --profile config/profiles/24x24-two-supply-v2.json
+./build-release/hexa_udon validate-profile --profile config/profiles/32x32-one-or-three-supply-v2.json
 ```
 
 秘密情報は実値をREADMEやGitへ書かず、環境変数から渡します。
@@ -44,7 +44,7 @@ export HEXA_LAN_WORKER_SECRET='(公式tokenとは別に安全な環境で設定)
 ### check
 
 ```bash
-../30013-build-release/hexa_udon check --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN
+./build-release/hexa_udon check --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN
 ```
 
 `check`は成功/失敗と安全な分類だけを表示し、base URL、host、token、HTTP本文は表示しません。
@@ -54,7 +54,7 @@ export HEXA_LAN_WORKER_SECRET='(公式tokenとは別に安全な環境で設定)
 通常はdry-runです。dry-runでもGETによる観測は行いますが、競技POSTは行いません。
 
 ```bash
-../30013-build-release/hexa_udon auto \
+./build-release/hexa_udon auto \
   --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
   --profile-set v2 --planner daily-improvement \
   --session-dir /secure/runtime/session --log-dir /secure/runtime/log
@@ -63,7 +63,7 @@ export HEXA_LAN_WORKER_SECRET='(公式tokenとは別に安全な環境で設定)
 `--execute`は明示的に提出POSTを有効にするオプションです。
 
 ```bash
-../30013-build-release/hexa_udon auto \
+./build-release/hexa_udon auto \
   --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
   --profile-set v2 --planner daily-improvement --execute \
   --session-dir /secure/runtime/session --log-dir /secure/runtime/log
@@ -73,31 +73,59 @@ export HEXA_LAN_WORKER_SECRET='(公式tokenとは別に安全な環境で設定)
 
 ### worker
 
-workerは任意機能です。公式tokenとbase URLはworkerへ渡しません。
+workerは任意の探索補助機能です。主PC単独でも通常のbaseline-first経路を実行できます。workerを使う場合も、workerの失敗、timeout、通信失敗、claim mismatch、strict再検証失敗では、主PCのbaselineまたは既に得られたmain候補へ安全にfallbackします。worker候補を最終採用するかどうかは、常に主PCが決定します。
+
+workerはloopbackまたはprivate LANの明示addressで起動します。worker専用secretは環境変数から渡し、実値はREADMEやGitへ書きません。
 
 ```bash
-../30013-build-release/hexa_udon worker \
+# loopback例
+export HEXA_LAN_WORKER_SECRET='(安全な環境で設定)'
+./build-release/hexa_udon worker \
   --listen 127.0.0.1:39001 --worker-token-env HEXA_LAN_WORKER_SECRET
 
-../30013-build-release/hexa_udon auto \
+# private LAN例（実際のIP、port、secretは運用環境で設定）
+./build-release/hexa_udon worker \
+  --listen 192.168.1.20:39001 --worker-token-env HEXA_LAN_WORKER_SECRET
+```
+
+主PCからworkerを指定する場合は、`--lan-worker`をrepeatableに指定できます。提出を行う実行例は`--execute`を明示し、SessionとOperationLogはGit外の保護されたdirectoryへ置きます。
+
+```bash
+./build-release/hexa_udon auto \
   --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
-  --profile-set v2 --planner daily-improvement \
+  --profile-set v2 --planner daily-improvement --execute \
   --lan-worker 127.0.0.1:39001 --lan-worker-timeout-ms 10000 \
   --session-dir /secure/runtime/session --log-dir /secure/runtime/log
 ```
 
-`--lan-worker`はrepeatableです。baseline検証後、本体Optimizerと指定workerを共有hard deadline内で並行探索します。主PCは全replyをclaim比較・strict再検証してから採否を決め、worker単位のtimeoutや不一致だけを無効化します。全候補が無効な場合はbaseline-retainedです。
+private LANでは、主PCから到達できるworker endpointを指定します。
+
+```bash
+./build-release/hexa_udon auto \
+  --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
+  --profile-set v2 --planner daily-improvement --execute \
+  --lan-worker 192.168.1.20:39001 --lan-worker-timeout-ms 10000 \
+  --session-dir /secure/runtime/session --log-dir /secure/runtime/log
+```
+
+workerはbaselineをstrict検証した後の探索補助を担当し、本体Optimizerと共有hard deadline内で並行探索します。worker 0/1は、worker index/count、requestIdDigest、canonical inputHash、planner seed、候補数などのclaim情報を付けて候補を生成します。主PCはreplyのclaimを比較し、input/state/map/profile identity、seed、index/count、候補hashなどを再確認します。
+
+主PCはworker候補をstrict Simulatorで再検証し、OfficialScoreを比較します。OfficialScoreが同等の場合だけDailyReadinessを比較し、最後にdeterministic tie-breakを適用します。timeout、通信失敗、claim mismatch、strict Simulator失敗、deadline不足の候補は採用せず、baselineまたはmain候補へfallbackします。
+
+workerは公式API、公式base URL、公式tokenを扱いません。workerが読むのはworker専用secretだけで、環境変数から渡します。token、secret、URL、HTTP本文、action全配列を通常ログへ出しません。listen addressはloopbackまたはprivate LANに限定し、公開addressや`0.0.0.0`を使用しません。実LANで使う前に、IP、port、firewall、binary version、主PCからの到達性を確認してください。
+
+今後の改善対象は、workerごとの探索範囲、共有hard deadline内のtimeout配分、worker間の役割分担、候補診断とstdout整理です。これらを変更しても、主PCのstrict再検証とbaseline fallbackを維持します。
 
 ### recover / show-state
 
 `recover`は保存済みSessionを使う復旧経路で、`--execute`なしではdry-runです。POST後の応答不明状態はRecoveryRequiredとなり、自動再送しません。
 
 ```bash
-../30013-build-release/hexa_udon recover \
+./build-release/hexa_udon recover \
   --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
   --session-dir /secure/runtime/session --log-dir /secure/runtime/log
 
-../30013-build-release/hexa_udon show-state --session-dir /secure/runtime/session
+./build-release/hexa_udon show-state --session-dir /secure/runtime/session
 ```
 
 ## アルゴリズム実装場所
@@ -145,11 +173,11 @@ API経路は初回`GET /setting`、`POST /agent`（type提出）、type提出後
 ## テスト
 
 ```bash
-ctest --test-dir ../30013-build-debug --output-on-failure
-ctest --test-dir ../30013-build-release --output-on-failure
+ctest --test-dir build-debug --output-on-failure
+ctest --test-dir build-release --output-on-failure
 
 # 関連6件だけ
-ctest --test-dir ../30013-build-debug -R \
+ctest --test-dir build-debug -R \
   'app_unit_tests|lan_worker_unit_tests|daily_deadline_policy_tests|control_tests|protocol_tests|session_tests' \
   --output-on-failure
 ```
@@ -178,13 +206,15 @@ ctest --test-dir ../30013-build-asan --output-on-failure
 git diff --check
 ```
 
-## packageと提出物の運用
+## GitHub mainと提出物の運用
 
-production packageは明示allowlistから生成し、`PACKAGE-MANIFEST.json`のversion、対象file、SHA-256、profile、source識別子を確認します。対象profileはv2の16×16、24×24、32×32の3種類です。
+GitHub mainは共有repoであり、そのsource treeを現行の提出対象として扱います。実行・提出前は、GitHub mainの`src/`、`include/`、`config/profiles/`、CMake定義、必要なdocsからclean buildを作ります。
 
-packageへはtests、results、tuning、dashboard、harness、replay、build成果物、runtime、Session/log、tokenやsecret実体を含めません。`runtime/`と`results/`は実行時データであり、source/packageへ混ぜません。
+旧package manifest、allowlist hash、source commit metadataは現行実行系・提出経路では使用しません。package専用manifestを前提にした旧production package運用は廃止します。
 
-`~/30013-submit`は生成済み提出物として扱い、直接編集しません。source更新後はclean Release build、`--help`、3 profileの`validate-profile`、allowlist、manifest hash、秘密情報非混入を確認してから、明示的な同期手順を行います。
+提出対象にはruntime、results、build成果物、Session/log、token、worker secretなどの実行時データや秘密情報を含めません。`runtime/`と`results/`はGitHub mainおよび提出物から分離します。
+
+`~/30013-submit`は旧production package工程の成果物であり、現行のGitHub main提出経路では使用しません。現行mainを直接確認し、sourceからclean buildして提出前検証を行います。
 
 ## 関連文書
 

@@ -4,4 +4,4 @@
 
 実会場のbase URLは運営LAN案内で受け取ります。仮の公式URLを固定しません。URLにtokenを付けず、既存clientの認証header経路を使います。Session/logはaccessを制限したGit外のdirectoryに保存します。
 
-package生成、CMake configure/build、`--help`、`validate-profile`はtokenを必要とせず、通信・POSTを行いません。生成manifestも環境変数、token、Authorization、remote URL、絶対home pathを保存しません。client実行時の通信は別の明示操作です。`--execute`は競技POSTを有効にするため、生成・検証で付けません。
+GitHub mainからのclean build、`--help`、`validate-profile`、CTestはtokenを必要とせず、通信・POSTを行いません。旧package manifestとmanifest hashは現行実行系・提出経路では使用しません。提出対象にはruntime、results、build成果物、token、secret、Session/logを含めません。`~/30013-submit`は旧production package工程であり、現行提出経路では使用しません。client実行時の通信は別の明示操作です。`--execute`は競技POSTを有効にするため、生成・検証で付けません。

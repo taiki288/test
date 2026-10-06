@@ -16,5 +16,7 @@
 
 - 実LAN、実API、実token、公式サーバー、競技POST、`--execute`をこのphaseの検証対象にしない。
 - tuning、dashboard、replay、runtime、results、実験成果物をproduction sourceへ混在させない。
-- package再生成とmanifest確認は別工程とし、通常の文書・Git生成物整理では`PACKAGE-MANIFEST.json`を変更しない。
+- GitHub mainを共有repo兼提出対象とし、実行・提出前はsourceからclean buildを作る。
+- 旧package manifest、allowlist hash、source commit metadataは現行実行系・提出経路では使用しない。
+- runtime、results、build成果物、token、secret、Session/logは提出対象に含めない。`~/30013-submit`は旧production package工程であり、現行提出経路では使用しない。
 - source、include、config、docs、tests、scriptsをbuild生成物整理の対象にしない。
