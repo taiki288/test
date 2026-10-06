@@ -1,66 +1,194 @@
-# hexa-udon v2 production package
+# hexa-udon
 
-16×16、24×24、32×32のv2 profileを使う本番clientのsource-only treeです。主PC単独のstrict-verified baselineを標準とし、LAN workerは明示opt-inの候補計算補助です。主PCだけが公式token、base URL、HTTP、POSTを扱い、workerの失敗時は主PCへ戻ります。
+16×16、24×24、32×32のv2 profileに対応するC++20 clientです。WSL/Linuxでの実行を基本とし、練習場と本番は`--base-url`で接続先を分けます。`--execute`を付けた場合だけ提出POSTを有効にします。
 
-明示allowlistのCMake/source/header、v2 profile三種、当日運用文書、`PACKAGE-MANIFEST.json`だけを含みます。v1、実験、Catalog、研究snapshot、Dashboard、Harness、Replay、tests、rehearsal driver、scripts、results、Git metadataは含みません。
+主PCが公式API、token、baseline生成、strict Simulatorによる最終検証、提出を担当します。LAN workerは任意の候補計算補助で、timeout、通信失敗、claim mismatch、strict再検証失敗時はbaselineへfallbackします。
 
-## Clean Release build（通信なし）
+## 初期セットアップ
 
-C++20対応compiler、CMake、nlohmann_json 3.11.3以上、libcurlを事前に用意してください。CMakeは依存をネットワークから取得しません。
+必要なものはC++20対応コンパイラ、CMake 3.20以上、nlohmann_json 3.11.3以上、libcurlです。CMakeは依存関係をネットワークから取得しません。build directoryは構成ごとに分け、同じdirectoryをDebug/ReleaseやOS間で共用しないでください。
 
 ```bash
-cmake -S . -B ../30013-prod-build -DCMAKE_BUILD_TYPE=Release
-cmake --build ../30013-prod-build --parallel 4
-../30013-prod-build/hexa_udon --help
-../30013-prod-build/hexa_udon validate-profile --profile config/profiles/16x16-one-supply-v2.json
-../30013-prod-build/hexa_udon validate-profile --profile config/profiles/24x24-two-supply-v2.json
-../30013-prod-build/hexa_udon validate-profile --profile config/profiles/32x32-one-or-three-supply-v2.json
+# Debug
+cmake -S . -B ../30013-build-debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build ../30013-build-debug --parallel 4
+
+# Release
+cmake -S . -B ../30013-build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build ../30013-build-release --parallel 4
+
+# CLI確認（通信なし）
+../30013-build-release/hexa_udon --help
 ```
 
-build directoryはpackage外の新規directoryに置くと、配布manifestのsource hash照合を維持できます。上記確認はtoken不要・HTTP/POSTなしです。package内では開発用loopback rehearsalを実行しません。
-
-## 秘密情報
-
-公式tokenは環境変数からだけ渡します。worker secretは公式tokenと別の環境変数にし、どちらもsource、Session、log、manifest、標準出力へ保存しません。実会場base URLは運営から受け取り、コードや文書へ固定しません。
-
-## 主PC単独の起動
-
-profile未指定の既定動作は変えず、対応sizeを最初の認証済み`GET /setting`から選ぶ場合だけ`--profile-set v2`を明示します。settingは一度だけ取得し、Day0 type selectorへ再利用します。
+v2 profileは次の3種類です。`validate-profile`はoffline検証で、tokenやHTTPを必要としません。
 
 ```bash
-export PROCON_TOKEN='安全な環境で設定した値'
-../30013-prod-build/hexa_udon auto --base-url "$VENUE_BASE_URL" \
-  --token-env PROCON_TOKEN --profile-set v2 \
-  --session-dir /secure/runtime/match-session \
-  --log-dir /secure/runtime/match-log
+../30013-build-release/hexa_udon validate-profile --profile config/profiles/16x16-one-supply-v2.json
+../30013-build-release/hexa_udon validate-profile --profile config/profiles/24x24-two-supply-v2.json
+../30013-build-release/hexa_udon validate-profile --profile config/profiles/32x32-one-or-three-supply-v2.json
 ```
 
-上記はdry-runです。当日、提出を明示承認した場合だけ同じコマンドへ`--execute`を追加します。当日以外は`--execute`を実行しないでください。
-
-## LAN worker（任意）
-
-workerはloopbackまたは明示したprivate LAN addressで起動し、公式token/base URLを渡しません。
+秘密情報は実値をREADMEやGitへ書かず、環境変数から渡します。
 
 ```bash
-export HEXA_LAN_WORKER_SECRET='公式tokenとは別の値'
-./hexa_udon worker --listen 192.168.1.20:40123 --worker-token-env HEXA_LAN_WORKER_SECRET
-./hexa_udon auto --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
+export VENUE_BASE_URL='(安全な環境で設定)'
+export PROCON_TOKEN='(安全な環境で設定)'
+export HEXA_LAN_WORKER_SECRET='(公式tokenとは別に安全な環境で設定)'
+```
+
+`runtime/`、`results/`、Session、operations log、token、worker secret、build成果物はcommitしません。
+
+## CLIと起動方法
+
+### check
+
+```bash
+../30013-build-release/hexa_udon check --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN
+```
+
+`check`は成功/失敗と安全な分類だけを表示し、base URL、host、token、HTTP本文は表示しません。
+
+### auto
+
+通常はdry-runです。dry-runでもGETによる観測は行いますが、競技POSTは行いません。
+
+```bash
+../30013-build-release/hexa_udon auto \
+  --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
   --profile-set v2 --planner daily-improvement \
-  --lan-worker 192.168.1.20:40123 --lan-worker-timeout-ms 250
+  --session-dir /secure/runtime/session --log-dir /secure/runtime/log
 ```
 
-workerには現在日のcanonical PlannerInputだけを渡します。主PCは先にbaselineを検証し、応答を独立Simulatorで再検証します。timeout、切断、identity不一致、低score、Simulator失敗ではworkerを待たずbaseline-retainedへ戻ります。loopbackで確認済みですが、実LAN実APIは第49段階で確認予定です。詳細は[LAN運用](docs/lan-worker.md)を参照してください。
+`--execute`は明示的に提出POSTを有効にするオプションです。
 
-## 当日運用
+```bash
+../30013-build-release/hexa_udon auto \
+  --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
+  --profile-set v2 --planner daily-improvement --execute \
+  --session-dir /secure/runtime/session --log-dir /secure/runtime/log
+```
 
- [運用手順](docs/operations.md)、[停止・Recovery](docs/recovery.md)、[認証と秘密管理](docs/safety.md)を確認してください。主PC一台・main client一プロセスだけで運用します。v2を対応サイズで明示指定するか、練習場の一発起動では`--profile-set v2`を使って最初の`GET /setting`からsize/agent数に対応するv2を一意に選びます（settingの追加取得はありません）。Day0 `/setting`だけでtypeを選び、毎日の現在観測値からbaseline-firstで計画します。日次は実`endsAt`、strict Simulator、reserve、余剰時だけの改善探索を使います。
+`--profile FILE`は`auto`または`recover`に渡せます。`--profile-set v2`は`auto`で最初の`GET /setting`から16×16、24×24、32×32のv2 profileを選択します。32×32の供給車allowlistは`[1,3]`です。
 
-`--execute`は競技提出（POST）を有効にする操作です。package生成・build/help/schema検証では実行しません。
+### worker
 
-## ユーザー自身が別repo化・更新する場合
+workerは任意機能です。公式tokenとbase URLはworkerへ渡しません。
 
-開発repoの`package-production`で新しい空directoryへ生成し、clean build/help/schemaとmanifestを確認してください。既存submission repoへ直接生成しないでください。
+```bash
+../30013-build-release/hexa_udon worker \
+  --listen 127.0.0.1:39001 --worker-token-env HEXA_LAN_WORKER_SECRET
 
-新しい別repoを作る場合に限り、ユーザー自身がpackage directoryで`git init`、内容確認、commit/pushを行います。既存submission repoを更新する場合は、まず未コミット変更とSession/log/tokenの保存先を確認・退避し、新packageとのdiffをレビューしてから必要なsourceを反映してください。既存treeを丸ごと削除・上書きせず、v1や古い開発ファイルの除去はユーザーが明示的にレビューしてください。runtime Sessionをsource更新に混ぜないでください。generatorはGitやGitHubを操作しません。
+../30013-build-release/hexa_udon auto \
+  --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
+  --profile-set v2 --planner daily-improvement \
+  --lan-worker 127.0.0.1:39001 --lan-worker-timeout-ms 10000 \
+  --session-dir /secure/runtime/session --log-dir /secure/runtime/log
+```
 
-manifestの`sourceCommit`は読取可能な生成元HEAD識別子です。未コミット変更を含む実際の配布内容は各file SHA-256で識別します。時刻・絶対home path・remote URL・環境変数値はmanifestに保存しません。
+`--lan-worker`はrepeatableです。baseline検証後、本体Optimizerと指定workerを共有hard deadline内で並行探索します。主PCは全replyをclaim比較・strict再検証してから採否を決め、worker単位のtimeoutや不一致だけを無効化します。全候補が無効な場合はbaseline-retainedです。
+
+### recover / show-state
+
+`recover`は保存済みSessionを使う復旧経路で、`--execute`なしではdry-runです。POST後の応答不明状態はRecoveryRequiredとなり、自動再送しません。
+
+```bash
+../30013-build-release/hexa_udon recover \
+  --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
+  --session-dir /secure/runtime/session --log-dir /secure/runtime/log
+
+../30013-build-release/hexa_udon show-state --session-dir /secure/runtime/session
+```
+
+## アルゴリズム実装場所
+
+| 領域 | 主な実装 |
+| --- | --- |
+| API sequence、日次実行、候補採否 | `src/app/auto_client.cpp` |
+| deadline、baseline、worker handoff、fallback | `src/optimizer/daily_deadline_policy.cpp` |
+| OfficialScore、探索、近傍受理 | `src/optimizer/optimizer.cpp` |
+| baselineのGreedy planner | `src/planner/greedy_planner.cpp` |
+| 補給・rendezvous planner | `src/planner/refuel_planner.cpp` |
+| 六角形経路・距離 | `src/pathfinding/` |
+| 行動妥当性と結果の単一判定源 | `src/simulator/` |
+| LAN workerのrequest/reply | `src/app/lan_worker.cpp` |
+| HTTP、rate limit、Retry-After、request control | `src/protocol/` |
+| Session、Recovery、polling、永続化 | `src/session/` |
+
+## 採用判定の流れ
+
+```text
+baseline生成・strict検証
+  → 本体Optimizerとworker 0/1を並行探索
+  → 主PCでclaim比較・strict Simulator再検証
+  → OfficialScore（辞書順）
+  → 同点時DailyReadiness
+  → deterministic tie-break
+  → 採用、またはbaseline-retained
+```
+
+policy層は候補生成、実行順、deadline、timeout/fallback、strict検証済み候補の返却を担当します。App層はworker claimの再検証、主PCstrict結果の確認、OfficialScore/Readiness比較、最終採用を担当します。
+
+## 重要な安全契約
+
+- `hardPlanningDeadline = endsAt - 10秒`。最後の10秒は提出前の通信・安全余裕です。
+- `send_at >= deadline`ではGET/POSTを開始しません。deadline後に新しいstrict検証も開始しません。
+- policyのreserveは改善開始可否、fallback、診断に使いますが、hard deadlineから二重減算しません。
+- worker候補は主PCでinput、state、map/profile identity、termination、score、readinessを再検証します。
+- claim mismatch、timeout、transport/protocol failure、strict Simulator失敗の候補は採用しません。
+- `submissionAttempted`は`false`（POST前）、`true`（POST後2xx）、`null`（POST後の不明結果）の三値です。
+- `null`はRecoveryRequiredとして保存し、自動再送しません。`false`はPOST前停止でありRecoveryRequiredではありません。
+- 通常ログへtoken、URL、HTTP本文、action配列、worker secretを保存しません。
+
+API経路は初回`GET /setting`、`POST /agent`（type提出）、type提出後の日次`GET /`、日次`POST /`です。403/429、Retry-After、bounded backoff、polling limit、deadline停止はOperationLogへ安全な分類と数値で記録します。初回settingを日次pollingで再取得しないため、`/setting` stormを作りません。
+
+## テスト
+
+```bash
+ctest --test-dir ../30013-build-debug --output-on-failure
+ctest --test-dir ../30013-build-release --output-on-failure
+
+# 関連6件だけ
+ctest --test-dir ../30013-build-debug -R \
+  'app_unit_tests|lan_worker_unit_tests|daily_deadline_policy_tests|control_tests|protocol_tests|session_tests' \
+  --output-on-failure
+```
+
+CTestには次の6件が登録されています。
+
+- `app_unit_tests`
+- `lan_worker_unit_tests`
+- `daily_deadline_policy_tests`
+- `control_tests`
+- `protocol_tests`
+- `session_tests`
+
+ASan/UBSanは専用build directoryで構成します。loopback workerはsanitizerや低速環境でtimeoutし得るため、機能失敗と環境由来のtimeoutを分けて報告します。
+
+```bash
+cmake -S . -B ../30013-build-asan \
+  -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+  -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
+  -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
+cmake --build ../30013-build-asan --parallel 4
+ctest --test-dir ../30013-build-asan --output-on-failure
+```
+
+```bash
+git diff --check
+```
+
+## packageと提出物の運用
+
+production packageは明示allowlistから生成し、`PACKAGE-MANIFEST.json`のversion、対象file、SHA-256、profile、source識別子を確認します。対象profileはv2の16×16、24×24、32×32の3種類です。
+
+packageへはtests、results、tuning、dashboard、harness、replay、build成果物、runtime、Session/log、tokenやsecret実体を含めません。`runtime/`と`results/`は実行時データであり、source/packageへ混ぜません。
+
+`~/30013-submit`は生成済み提出物として扱い、直接編集しません。source更新後はclean Release build、`--help`、3 profileの`validate-profile`、allowlist、manifest hash、秘密情報非混入を確認してから、明示的な同期手順を行います。
+
+## 関連文書
+
+- [運用手順](docs/operations.md)
+- [LAN worker運用](docs/lan-worker.md)
+- [Recovery](docs/recovery.md)
+- [安全契約](docs/safety.md)
