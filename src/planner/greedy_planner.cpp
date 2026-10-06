@@ -160,17 +160,28 @@ DailyReadiness daily_readiness(
             if (spot < visited.size()) visited[spot] = true;
         }
     }
-    for (std::size_t spot = 0; spot < match.spots.size(); ++spot) {
-        if (visited[spot]) continue;
-        std::int64_t best = std::numeric_limits<std::int64_t>::max();
-        for (std::size_t agent = 0; agent < simulation.end_agents.size(); ++agent) {
-            if (simulation.end_agents[agent].kind != core::AgentKind::Patrol) continue;
-            const auto distance = grid_distance(match.map, simulation.end_agents[agent].position,
-                                                match.spots[spot].position);
-            // Two steps per plain edge is a conservative, future-road-free estimate.
-            if (distance * 2 <= simulation.end_agents[agent].fuel) best = std::min(best, distance);
+    std::vector<bool> reachable(match.spots.size(), false);
+    auto pathfinder_result = pathfinding::Pathfinder::create(match.map, daily.traffic);
+    if (pathfinder_result) {
+        auto pathfinder = std::move(pathfinder_result).value();
+        for (const auto& agent : simulation.end_agents) {
+            if (agent.kind != core::AgentKind::Patrol) continue;
+            auto tree_result = pathfinder.shortest_path_tree(
+                agent.position, pathfinding::RouteObjective::FuelEfficient);
+            if (!tree_result) continue;
+            const auto& tree = tree_result.value();
+            for (std::size_t spot = 0; spot < match.spots.size(); ++spot) {
+                if (visited[spot] || reachable[spot]) continue;
+                auto route = tree.route_to(match.spots[spot].position);
+                if (route && route.value().has_value()
+                    && route.value()->cost.patrol_fuel <= agent.fuel) {
+                    reachable[spot] = true;
+                }
+            }
         }
-        if (best != std::numeric_limits<std::int64_t>::max()) ++result.uncollected_spot_reachability;
+    }
+    for (std::size_t spot = 0; spot < match.spots.size(); ++spot) {
+        if (!visited[spot] && reachable[spot]) ++result.uncollected_spot_reachability;
     }
     std::vector<std::size_t> patrols;
     std::vector<std::size_t> supplies;
@@ -204,7 +215,6 @@ DailyReadiness daily_readiness(
         result.deterministic_order.push_back(static_cast<std::int32_t>(agent.position.value));
         result.deterministic_order.push_back(agent.fuel);
     }
-    static_cast<void>(daily);
     return result;
 }
 
