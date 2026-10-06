@@ -36,6 +36,17 @@ const char* safe_error_classification(hexa_udon::protocol::ErrorCode code) noexc
     default: return "check-failed";
     }
 }
+
+const char* run_status_label(hexa_udon::app::RunStatus status) noexcept {
+    switch (status) {
+    case hexa_udon::app::RunStatus::Completed: return "Success";
+    case hexa_udon::app::RunStatus::Stopped: return "Stopped";
+    case hexa_udon::app::RunStatus::RecoveryRequired: return "RecoveryRequired";
+    case hexa_udon::app::RunStatus::Failed: return "Failed";
+    }
+    return "Failed";
+}
+
 namespace app = hexa_udon::app;
 namespace protocol = hexa_udon::protocol;
 
@@ -365,7 +376,7 @@ int main(int argc, char** argv) {
     app::AutoCompetitionClient client(api, std::move(config), clock,
         [] { return stop_requested != 0; }, std::cout, &logger);
     const auto result = client.run();
-    std::cout << "result=" << static_cast<int>(result.status) << " message=" << result.message << '\n';
+    std::cout << "result=" << run_status_label(result.status) << '\n';
     return result.status == app::RunStatus::Completed ? 0
          : result.status == app::RunStatus::Stopped ? 130 : 1;
 }

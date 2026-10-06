@@ -7,7 +7,7 @@
 次は運営から接続先を受け取り、復旧判断後にユーザーが使う参考手順です。今回実行しません。
 
 ```bash
-../30013-prod-build/hexa_udon recover --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
+./build-release/hexa_udon recover --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
   --profile config/profiles/32x32-one-or-three-supply-v2.json \
   --session-dir /secure/runtime/match-session --log-dir /secure/runtime/match-log
 ```
