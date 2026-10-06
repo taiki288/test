@@ -1,2 +1,0 @@
-/usr/bin/ar qc libhexa_udon_prematch_selector.a CMakeFiles/hexa_udon_prematch_selector.dir/src/planner/prematch_type_selector.cpp.o
-/usr/bin/ranlib libhexa_udon_prematch_selector.a

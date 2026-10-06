@@ -1,2 +1,0 @@
-/usr/bin/ar qc libhexa_udon_protocol.a CMakeFiles/hexa_udon_protocol.dir/src/protocol/api_client.cpp.o CMakeFiles/hexa_udon_protocol.dir/src/protocol/request_control.cpp.o
-/usr/bin/ranlib libhexa_udon_protocol.a

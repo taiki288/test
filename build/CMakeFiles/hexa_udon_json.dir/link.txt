@@ -1,2 +1,0 @@
-/usr/bin/ar qc libhexa_udon_json.a CMakeFiles/hexa_udon_json.dir/src/protocol/json_codec.cpp.o
-/usr/bin/ranlib libhexa_udon_json.a

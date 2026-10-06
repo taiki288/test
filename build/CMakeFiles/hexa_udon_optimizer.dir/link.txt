@@ -1,2 +1,0 @@
-/usr/bin/ar qc libhexa_udon_optimizer.a CMakeFiles/hexa_udon_optimizer.dir/src/optimizer/optimizer.cpp.o CMakeFiles/hexa_udon_optimizer.dir/src/optimizer/daily_deadline_policy.cpp.o
-/usr/bin/ranlib libhexa_udon_optimizer.a

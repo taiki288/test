@@ -1,2 +1,0 @@
-/usr/bin/ar qc libhexa_udon_simulator.a CMakeFiles/hexa_udon_simulator.dir/src/simulator/action.cpp.o CMakeFiles/hexa_udon_simulator.dir/src/simulator/simulator.cpp.o
-/usr/bin/ranlib libhexa_udon_simulator.a
