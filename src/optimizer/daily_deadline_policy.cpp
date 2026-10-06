@@ -1,6 +1,7 @@
 #include "hexa_udon/optimizer/daily_deadline_policy.hpp"
 #include <algorithm>
 #include <cctype>
+#include <future>
 #include <iomanip>
 #include <sstream>
 namespace hexa_udon::optimizer {
@@ -156,6 +157,8 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
     // The caller supplies hardPlanningDeadline = endsAt - communication reserve.
     // policy.reserve is a start/admission guard, not another wall-clock subtraction.
     const auto stop=*deadline;
+    constexpr Ms reply_grace{100};
+    r["replyGraceMs"] = reply_grace.count();
     const auto baseline_start=now();
     const auto baseline_deadline=std::min(stop,baseline_start+policy.baseline_max);
     r["baselineCreatedAfterStartUs"]=micros(started);
@@ -193,12 +196,50 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
     r["baselineTermination"]="completed"; r["baselineWallUs"]=micros(baseline_start);
     r["baselineRemainingMs"]=remaining(); r["baselineParity"]["status"]="same-input-baseline-verified";
     result.plan=refuel.value().plan; result.simulation=verified.value();
-    auto final_score=bs; auto final_readiness=br; r["adoptionReason"]="baseline-retained";
+    auto final_score=bs; auto final_readiness=br;
+    r["candidateSource"]="baseline";
+    r["adoptionReason"]="baseline-retained";
+
+    std::future<OptimizerOutcome> improvement_future;
+    bool improvement_started = false;
+    Time improvement_start{};
+    Time improvement_deadline = stop;
+    r["remainingBeforeOptimizerMs"] = remaining();
+    const auto remaining_for_improvement = remaining();
+    const auto stage_remaining = std::max<std::int64_t>(
+        0, remaining_for_improvement - reply_grace.count());
+    const auto configured_improvement_cap = policy.size == 32
+        ? std::max<std::int64_t>(0, stage_remaining - policy.minimum_improvement.count())
+        : policy.improvement_max.count();
+    const auto improvement_budget = std::min<std::int64_t>(configured_improvement_cap,
+        stage_remaining);
+    r["effectiveImprovementBudgetMs"] = improvement_budget;
+    if (run_improvement && remaining() > policy.minimum_improvement.count()
+        && improvement_budget > 0) {
+        improvement_start = now();
+        improvement_deadline = std::min(stop - reply_grace,
+            improvement_start + Ms{improvement_budget});
+        auto config = oc;
+        config.prefer_daily_readiness_on_tie = true;
+        r["improvementCreatedAfterStartUs"] = micros(started);
+        r["improvementStarted"] = true;
+        r["improvementStartRemainingMs"] = remaining();
+        r["improvementDeadlineRemainingMs"] = std::chrono::duration_cast<Ms>(
+            improvement_deadline - improvement_start).count();
+        improvement_started = true;
+        improvement_future = std::async(std::launch::async,
+            [&, config, improvement_deadline] {
+                return stages.improve(in, greedy.value(), refuel.value(), config,
+                    improvement_deadline, now);
+            });
+    }
     if (stages.worker && worker_configured_timeout.count() > 0) {
         const auto worker_started = now();
         const auto worker_remaining = remaining();
+        const auto worker_stage_remaining = std::max<std::int64_t>(
+            0, worker_remaining - reply_grace.count());
         const auto effective = std::max<std::int64_t>(0, std::min<std::int64_t>(
-            worker_configured_timeout.count(), worker_remaining));
+            worker_configured_timeout.count(), worker_stage_remaining));
         r["workerEffectiveTimeoutMs"] = effective;
         r["workerStarted"] = effective > 0;
         r["workerStartRemainingMs"] = worker_remaining;
@@ -217,6 +258,7 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
                 // make the final worker adoption decision.
                 r["workerCandidateReturned"] = true;
                 r["workerFinalAdoptionPending"] = true;
+                r["candidateSource"] = "worker";
                 r["adoptionReason"] = "worker-candidate-for-app-review";
                 if (worker.record.contains("score") && worker.record["score"].is_array()
                     && worker.record["score"].size() == 3) {
@@ -236,23 +278,10 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
         r["workerStarted"] = false;
         r["workerFallbackReason"] = "worker-not-configured";
     }
-    r["remainingBeforeOptimizerMs"] = remaining();
-    const auto remaining_for_improvement = remaining();
-    const auto configured_improvement_cap = policy.size == 32
-        ? std::max<std::int64_t>(0, remaining_for_improvement - policy.minimum_improvement.count())
-        : policy.improvement_max.count();
-    const auto improvement_budget = std::min<std::int64_t>(configured_improvement_cap,
-        remaining_for_improvement);
-    r["effectiveImprovementBudgetMs"] = improvement_budget;
-    if(run_improvement && remaining()>policy.minimum_improvement.count()
-       && improvement_budget > 0) {
-        const auto improvement_start=now(); const auto improvement_deadline=std::min(stop,improvement_start+Ms{improvement_budget});
-        r["improvementCreatedAfterStartUs"]=micros(started);
-        r["improvementStarted"]=true; r["improvementStartRemainingMs"]=remaining();
-        r["improvementDeadlineRemainingMs"]=std::chrono::duration_cast<Ms>(improvement_deadline-improvement_start).count();
-        auto config=oc; config.prefer_daily_readiness_on_tie=true;
-        auto improved=stages.improve(in,greedy.value(),refuel.value(),config,improvement_deadline,now);
-        r["improvementUs"]=micros(improvement_start); r["improvementEndRemainingMs"]=remaining();
+    if (improvement_started) {
+        auto improved = improvement_future.get();
+        r["improvementUs"] = micros(improvement_start);
+        r["improvementEndRemainingMs"] = remaining();
         if(!improved) {r["improvementTermination"]=now()>=improvement_deadline?"deadline_exhausted":"planner_failure";r["improvementFailureReason"]="optimizer failed; baseline retained";}
         else {
             const auto& c=improved.value(); r["evaluatedCandidates"]=c.generated_candidates; r["validCandidates"]=c.valid_candidates; r["acceptedCandidates"]=c.accepted_candidates;
@@ -289,6 +318,7 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
                 r["improvementFailureReason"]="";
                 if(valid_routes && now()<stop && decision.adopt) {
                     result.plan=c.plan; result.simulation=c.simulation; final_score=cs; final_readiness=cr;
+                    r["candidateSource"]="main";
                     r["adoptionReason"]=decision.reason==DailyImprovementDecisionReason::OfficialScoreImproved
                         ? "official-score-improved" : "readiness-tie-break";
                 } else {
@@ -315,12 +345,21 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
                     const auto decision=evaluate_daily_improvement(bs,br,cs,cr);
                     r["improvementTermination"]=now()<improvement_deadline?"completed":"deadline_exhausted";
                     if(valid_routes && now()<improvement_deadline && decision.adopt) {result.plan=c.plan;result.simulation=candidate.value();final_score=cs;final_readiness=cr;
+                        r["candidateSource"]="main";
                         r["adoptionReason"]=decision.reason==DailyImprovementDecisionReason::OfficialScoreImproved?"official-score-improved":"readiness-tie-break";}
                 }
             }
         }
-        r["improvementUs"]=micros(improvement_start); r["improvementEndRemainingMs"]=remaining();
-    } else {r["improvementTermination"]="not-started";r["improvementFailureReason"]=run_improvement?"insufficient remaining time for minimum improvement":"explicitly disabled";}
+        r["improvementUs"] = micros(improvement_start);
+        r["improvementEndRemainingMs"] = remaining();
+    } else {
+        r["improvementTermination"]="not-started";
+        r["improvementFailureReason"]=run_improvement?"insufficient remaining time for minimum improvement":"explicitly disabled";
+    }
+    if (r.value("candidateSource", "baseline") == "worker"
+        && r.value("adoptionReason", "") == "worker-candidate-for-app-review") {
+        r["adoptionReason"] = r.value("workerAdoptionReason", "official-score-improved");
+    }
     const auto final=record_plan(*result.plan,*result.simulation);
     for(const auto& key:{"actionHash","planHash","endStateHash"}) r[key]=final[key];
     r["score"]=score(final_score);r["readiness"]=readiness(final_readiness);
