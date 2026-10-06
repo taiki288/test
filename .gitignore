@@ -1,1 +1,11 @@
-runtime/
+/build/
+/build-release/
+/build-sanitize/
+/build-linux/
+/results/
+/runtime/
+CMakeFiles/
+CMakeCache.txt
+Testing/
+__pycache__/
+*.pyc
