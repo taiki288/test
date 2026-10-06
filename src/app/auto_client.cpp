@@ -1006,7 +1006,7 @@ RunResult AutoCompetitionClient::run() {
                             if (timeout.count() <= 0) {
                                 pending_replies.push_back({
                                     std::async(std::launch::deferred, [] {
-                                        return LanWorkerReply{false, {}, "worker reply timeout"};
+                                        return LanWorkerReply{false, {}, "worker reply timeout", "read-timeout"};
                                     }), dispatched_at});
                             } else {
                                 pending_replies.push_back({
@@ -1054,6 +1054,17 @@ RunResult AutoCompetitionClient::run() {
                                     {"scoreDigest", observation_score_digest},
                                     {"readinessDigest", observation_readiness_digest},
                                     {"elapsedMs", elapsed_ms}, {"termination", observation_termination},
+                                    {"workerTermination", result.record.value("workerTermination", "")},
+                                    {"workerBestCandidateAtLocalDeadline",
+                                        result.record.value("workerBestCandidateAtLocalDeadline", false)},
+                                    {"workerBestCandidateStrictVerified",
+                                        result.record.value("workerBestCandidateStrictVerified", false)},
+                                    {"mainRevalidationTermination",
+                                        result.record.value("mainRevalidationTermination", "")},
+                                    {"mainBestCandidateAtSharedDeadline",
+                                        result.record.value("mainBestCandidateAtSharedDeadline", false)},
+                                    {"mainBestCandidateStrictVerified",
+                                        result.record.value("mainBestCandidateStrictVerified", false)},
                                     {"claim", observation_claim}, {"strictRevalidation", observation_strict_revalidation},
                                     {"rejectionReason", observation_rejection_reason},
                                     {"comparison", observation_comparison},
@@ -1062,30 +1073,55 @@ RunResult AutoCompetitionClient::run() {
                                 if (observation_claim == "timeout"
                                     || observation_rejection_reason == "claim-mismatch"
                                     || observation_rejection_reason == "strict-revalidation-failed"
-                                    || observation_rejection_reason == "transport-failure") {
+                                    || !observation_rejection_reason.empty()) {
+                                    const auto warning = observation_claim == "timeout" ? "timeout"
+                                        : observation_rejection_reason == "claim-mismatch" ? "claim-mismatch"
+                                        : observation_rejection_reason == "strict-revalidation-failed" ? "strict-failure"
+                                        : "transport-failure";
                                     output_ << "warning=lan-worker "
-                                            << observation_rejection_reason << '\n';
+                                            << warning << '\n';
                                 }
                             }};
                             const auto reply = pending_replies[worker_index].reply.get();
                             if (!reply.success) {
-                                const auto failure_termination = reply.error.find("timeout") != std::string::npos
+                                const auto failure_classification = reply.failure_classification.empty()
+                                    ? classify_worker_failure(reply.error, worker_now() >= hard_deadline)
+                                    : reply.failure_classification;
+                                const auto is_timeout = failure_classification.ends_with("-timeout")
+                                    || failure_classification == "timeout";
+                                const auto failure_termination = is_timeout
                                     ? std::string{"timeout"} : std::string{"planner_failure"};
                                 result.record["workerTermination"] = failure_termination;
+                                result.record["workerBestCandidateAtLocalDeadline"] = false;
+                                result.record["workerBestCandidateStrictVerified"] = false;
                                 // This is a main-PC classification of the failed
                                 // revalidation, never a copy of a worker claim.
                                 const auto main_failure_termination = worker_now() >= hard_deadline
                                     ? std::string{"deadline_exhausted"} : failure_termination;
                                 result.record["mainRevalidationTermination"] = main_failure_termination;
+                                result.record["mainBestCandidateAtSharedDeadline"] = false;
+                                result.record["mainBestCandidateStrictVerified"] = false;
                                 observation_termination = failure_termination;
-                                observation_claim = failure_termination == "timeout" ? "timeout" : "mismatch";
-                                observation_rejection_reason = failure_termination == "timeout"
-                                    ? "timeout" : "transport-failure";
+                                observation_claim = is_timeout ? "timeout" : "mismatch";
+                                observation_rejection_reason = failure_classification;
                                 result.reason = reply.error.empty() ? "worker-failure" : reply.error;
                                 continue;
                             }
                             try {
                                 const auto worker_termination = reply.payload.value("termination", "");
+                                const auto worker_termination_diagnostic = reply.payload.value(
+                                    "workerTermination", worker_termination);
+                                const auto worker_best_at_local_deadline = reply.payload.contains(
+                                    "workerBestCandidateAtLocalDeadline")
+                                    ? reply.payload.value("workerBestCandidateAtLocalDeadline", false)
+                                    : reply.payload.value("bestCandidateAtDeadline", false);
+                                const auto worker_strict_verified = reply.payload.contains(
+                                    "workerBestCandidateStrictVerified")
+                                    ? reply.payload.value("workerBestCandidateStrictVerified", false)
+                                    : reply.payload.value("bestCandidateStrictVerified", false);
+                                result.record["workerTermination"] = worker_termination_diagnostic;
+                                result.record["workerBestCandidateAtLocalDeadline"] = worker_best_at_local_deadline;
+                                result.record["workerBestCandidateStrictVerified"] = worker_strict_verified;
                                 observation_termination = worker_termination;
                                 observation_candidate_count = reply.payload.value("evaluatedCandidates", 0);
                                 observation_score_digest = canonical_json_hash(reply.payload.value("officialScore", nlohmann::json(nullptr)));
@@ -1107,8 +1143,11 @@ RunResult AutoCompetitionClient::run() {
                                 // hard deadline. A previously retained main-PC best
                                 // remains eligible only for deadline fallback.
                                 if (worker_now() >= hard_deadline) {
-                                    result.record["mainRevalidationTermination"] = best_candidate.has_value()
+                                    const auto main_deadline_termination = best_candidate.has_value()
                                         ? "deadline_exhausted_best_available" : "deadline_exhausted";
+                                    result.record["mainRevalidationTermination"] = main_deadline_termination;
+                                    result.record["mainBestCandidateAtSharedDeadline"] = best_candidate.has_value();
+                                    result.record["mainBestCandidateStrictVerified"] = best_candidate.has_value();
                                     observation_claim = "mismatch";
                                     observation_rejection_reason = "deadline-exhausted";
                                     result.reason = "candidate-unverified-deadline";
@@ -1116,6 +1155,9 @@ RunResult AutoCompetitionClient::run() {
                                 }
                                 const auto simulation = simulator::simulate_day(sim_input, parsed.value());
                                 if (!simulation) {
+                                    result.record["mainRevalidationTermination"] = "completed";
+                                    result.record["mainBestCandidateAtSharedDeadline"] = false;
+                                    result.record["mainBestCandidateStrictVerified"] = false;
                                     observation_claim = "mismatch";
                                     observation_strict_revalidation = "failed";
                                     observation_rejection_reason = "strict-revalidation-failed";
@@ -1143,11 +1185,10 @@ RunResult AutoCompetitionClient::run() {
                                 const auto compare = [&](const std::string& field, const nlohmann::json& expected, const nlohmann::json& actual) {
                                     if (expected != actual) mismatches.push_back({{"field", field}, {"expectedDigest", canonical_json_hash(expected)}, {"actualDigest", canonical_json_hash(actual)}});
                                 };
-                                result.record["workerTermination"] = worker_termination;
-                                // A worker termination and its deadline-best flags are claims.
-                                // The main PC keeps two independent facts: whether its clock
-                                // has reached the hard deadline, and whether it held a strict
-                                // best candidate before that deadline.
+                                // The worker fields above describe the worker's local planner
+                                // deadline.  The main PC independently records its shared hard
+                                // deadline result below; these domains are intentionally not
+                                // compared.
                                 const bool score_better = planner::better_official_score(candidate_score, baseline_score);
                                 const bool readiness_better = candidate_score == baseline_score
                                     && planner::better_daily_readiness(candidate_readiness, baseline_readiness);
@@ -1161,13 +1202,15 @@ RunResult AutoCompetitionClient::run() {
                                         ? std::string{"deadline_exhausted_best_available"}
                                         : std::string{"deadline_exhausted"};
                                 result.record["mainRevalidationTermination"] = main_revalidation_termination;
-                                if (worker_termination != "completed"
-                                    && worker_termination != "iteration_limit"
-                                    && worker_termination != "deadline_exhausted_best_available") {
-                                    result.reason = worker_termination == "deadline_exhausted"
+                                result.record["mainBestCandidateAtSharedDeadline"] = main_deadline_best;
+                                result.record["mainBestCandidateStrictVerified"] = main_deadline_best;
+                                if (worker_termination_diagnostic != "completed"
+                                    && worker_termination_diagnostic != "iteration_limit"
+                                    && worker_termination_diagnostic != "deadline_exhausted_best_available") {
+                                    result.reason = worker_termination_diagnostic == "deadline_exhausted"
                                         ? "candidate-unverified-deadline" : "candidate-termination-invalid";
                                     observation_claim = "mismatch";
-                                    observation_rejection_reason = worker_termination == "deadline_exhausted"
+                                    observation_rejection_reason = worker_termination_diagnostic == "deadline_exhausted"
                                         ? "deadline-exhausted" : "termination-invalid";
                                     continue;
                                 }
@@ -1187,17 +1230,12 @@ RunResult AutoCompetitionClient::run() {
                                 compare("endStateHash", end_hash, reply.payload.value("endStateHash", nlohmann::json(nullptr)));
                                 compare("score", expected_score, reply.payload.value("officialScore", nlohmann::json(nullptr)));
                                 compare("readiness", expected_readiness, reply.payload.value("readiness", nlohmann::json(nullptr)));
-                                compare("termination", main_revalidation_termination, worker_termination);
-                                compare("bestCandidateAtDeadline", main_deadline_best,
-                                        reply.payload.value("bestCandidateAtDeadline", nlohmann::json(nullptr)));
-                                compare("bestCandidateStrictVerified", main_deadline_best,
-                                        reply.payload.value("bestCandidateStrictVerified", nlohmann::json(nullptr)));
                                 if (!mismatches.empty()) {
                                     observation_claim = "mismatch";
                                     observation_rejection_reason = "claim-mismatch";
                                     observation_mismatch_fields = mismatches;
                                     worker_claim_mismatch = true;
-                                    result.record["lanWorkerClaimDiagnostics"] = {{"workerEndpointDigest", endpoint_digest}, {"schemaVersion", reply.payload.value("protocolVersion", 0)}, {"evaluatorVersion", reply.payload.value("evaluatorVersion", "")}, {"requestIdDigest", protocol::request_id_digest_or_missing(worker_request.at("requestId"))}, {"fields", std::move(mismatches)}, {"workerTermination", worker_termination}, {"mainRevalidationTermination", main_revalidation_termination}, {"mainRevalidationFailureReason", ""}, {"fallback", "baseline-retained"}};
+                                    result.record["lanWorkerClaimDiagnostics"] = {{"workerEndpointDigest", endpoint_digest}, {"schemaVersion", reply.payload.value("protocolVersion", 0)}, {"evaluatorVersion", reply.payload.value("evaluatorVersion", "")}, {"requestIdDigest", protocol::request_id_digest_or_missing(worker_request.at("requestId"))}, {"fields", std::move(mismatches)}, {"workerTermination", worker_termination_diagnostic}, {"workerBestCandidateAtLocalDeadline", worker_best_at_local_deadline}, {"workerBestCandidateStrictVerified", worker_strict_verified}, {"mainRevalidationTermination", main_revalidation_termination}, {"mainBestCandidateAtSharedDeadline", main_deadline_best}, {"mainBestCandidateStrictVerified", main_deadline_best}, {"mainRevalidationFailureReason", ""}, {"fallback", "baseline-retained"}};
                                     result.reason = "candidate-claims-mismatch"; continue;
                                 }
                                 const bool better = score_better;

@@ -20,7 +20,13 @@ int main() {
         optimizer::DailyDeadlineStages::WorkerResult result;
         result.reason = "worker-timeout";
         result.record = {{"workerObservations", {{{"workerIndex", 1}, {"workerCount", 2},
-            {"termination", "timeout"}, {"adoption", "baseline-retained"}}}}};
+            {"termination", "timeout"}, {"workerTermination", "timeout"},
+            {"workerBestCandidateAtLocalDeadline", false},
+            {"workerBestCandidateStrictVerified", false},
+            {"mainRevalidationTermination", "completed"},
+            {"mainBestCandidateAtSharedDeadline", false},
+            {"mainBestCandidateStrictVerified", false},
+            {"adoption", "baseline-retained"}}}}};
         return result;
     };
     stages.improve = [](const planner::PlannerInput&, const planner::PlannerResult&,
