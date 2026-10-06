@@ -16,7 +16,9 @@
 ## 検証と境界
 
 - CTestには`app_unit_tests`、`lan_worker_unit_tests`、`daily_deadline_policy_tests`、`control_tests`、`protocol_tests`、`session_tests`の6件が登録済みである。
-- package再生成と`PACKAGE-MANIFEST.json`の最終確認は、source変更とは別工程で行う。manifestはその工程以外で変更しない。
+- GitHub mainは共有repoであり、そのsource treeを提出対象とする。実行・提出前はsourceからclean buildを作る。
+- 旧package manifest、allowlist hash、source commit metadataは現行実行系・提出経路では使用しない。
+- 提出対象にはruntime、results、build成果物、token、secret、Session/logを含めない。`~/30013-submit`は旧production package工程であり、現行提出経路では使用しない。
 - 実LAN、実API、実token、競技POSTは未検証であり、ローカルfixtureやloopbackの確認結果から本番完走を推定しない。
 - tuning、dashboard、replay、runtime、resultsはproduction sourceと分離する。生成物、秘密情報、Session/logをsourceへ追加しない。
 
