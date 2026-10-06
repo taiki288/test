@@ -1,0 +1,152 @@
+[
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_core.dir/src/core/map_definition.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/core/map_definition.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/core/map_definition.cpp",
+  "output": "CMakeFiles/hexa_udon_core.dir/src/core/map_definition.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_core.dir/src/core/model_validation.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/core/model_validation.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/core/model_validation.cpp",
+  "output": "CMakeFiles/hexa_udon_core.dir/src/core/model_validation.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_core.dir/src/core/types.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/core/types.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/core/types.cpp",
+  "output": "CMakeFiles/hexa_udon_core.dir/src/core/types.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_core.dir/src/core/type_candidates.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/core/type_candidates.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/core/type_candidates.cpp",
+  "output": "CMakeFiles/hexa_udon_core.dir/src/core/type_candidates.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_simulator.dir/src/simulator/action.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/simulator/action.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/simulator/action.cpp",
+  "output": "CMakeFiles/hexa_udon_simulator.dir/src/simulator/action.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_simulator.dir/src/simulator/simulator.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/simulator/simulator.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/simulator/simulator.cpp",
+  "output": "CMakeFiles/hexa_udon_simulator.dir/src/simulator/simulator.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_pathfinding.dir/src/pathfinding/pathfinder.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/pathfinding/pathfinder.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/pathfinding/pathfinder.cpp",
+  "output": "CMakeFiles/hexa_udon_pathfinding.dir/src/pathfinding/pathfinder.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_pathfinding.dir/src/pathfinding/important_point_routes.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/pathfinding/important_point_routes.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/pathfinding/important_point_routes.cpp",
+  "output": "CMakeFiles/hexa_udon_pathfinding.dir/src/pathfinding/important_point_routes.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_planner.dir/src/planner/greedy_planner.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/planner/greedy_planner.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/planner/greedy_planner.cpp",
+  "output": "CMakeFiles/hexa_udon_planner.dir/src/planner/greedy_planner.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_refuel_planner.dir/src/planner/refuel_planner.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/planner/refuel_planner.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/planner/refuel_planner.cpp",
+  "output": "CMakeFiles/hexa_udon_refuel_planner.dir/src/planner/refuel_planner.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_optimizer.dir/src/optimizer/optimizer.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/optimizer/optimizer.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/optimizer/optimizer.cpp",
+  "output": "CMakeFiles/hexa_udon_optimizer.dir/src/optimizer/optimizer.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_optimizer.dir/src/optimizer/daily_deadline_policy.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/optimizer/daily_deadline_policy.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/optimizer/daily_deadline_policy.cpp",
+  "output": "CMakeFiles/hexa_udon_optimizer.dir/src/optimizer/daily_deadline_policy.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_prematch_selector.dir/src/planner/prematch_type_selector.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/planner/prematch_type_selector.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/planner/prematch_type_selector.cpp",
+  "output": "CMakeFiles/hexa_udon_prematch_selector.dir/src/planner/prematch_type_selector.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_json.dir/src/protocol/json_codec.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/protocol/json_codec.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/protocol/json_codec.cpp",
+  "output": "CMakeFiles/hexa_udon_json.dir/src/protocol/json_codec.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_http.dir/src/protocol/http_transport.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/protocol/http_transport.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/protocol/http_transport.cpp",
+  "output": "CMakeFiles/hexa_udon_http.dir/src/protocol/http_transport.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_protocol.dir/src/protocol/api_client.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/protocol/api_client.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/protocol/api_client.cpp",
+  "output": "CMakeFiles/hexa_udon_protocol.dir/src/protocol/api_client.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_protocol.dir/src/protocol/request_control.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/protocol/request_control.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/protocol/request_control.cpp",
+  "output": "CMakeFiles/hexa_udon_protocol.dir/src/protocol/request_control.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_session.dir/src/session/session.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/session/session.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/session/session.cpp",
+  "output": "CMakeFiles/hexa_udon_session.dir/src/session/session.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_session.dir/src/session/polling.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/session/polling.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/session/polling.cpp",
+  "output": "CMakeFiles/hexa_udon_session.dir/src/session/polling.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_session.dir/src/session/persistence.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/session/persistence.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/session/persistence.cpp",
+  "output": "CMakeFiles/hexa_udon_session.dir/src/session/persistence.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_app.dir/src/app/auto_client.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/app/auto_client.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/app/auto_client.cpp",
+  "output": "CMakeFiles/hexa_udon_app.dir/src/app/auto_client.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_app.dir/src/app/session_lock.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/app/session_lock.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/app/session_lock.cpp",
+  "output": "CMakeFiles/hexa_udon_app.dir/src/app/session_lock.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_app.dir/src/app/production_profile.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/app/production_profile.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/app/production_profile.cpp",
+  "output": "CMakeFiles/hexa_udon_app.dir/src/app/production_profile.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon_app.dir/src/app/lan_worker.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/app/lan_worker.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/app/lan_worker.cpp",
+  "output": "CMakeFiles/hexa_udon_app.dir/src/app/lan_worker.cpp.o"
+},
+{
+  "directory": "/Users/sugawarakenshin/30013-o-udon/build",
+  "command": "/usr/bin/c++  -I/Users/sugawarakenshin/30013-o-udon/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -o CMakeFiles/hexa_udon.dir/src/app/main.cpp.o -c /Users/sugawarakenshin/30013-o-udon/src/app/main.cpp",
+  "file": "/Users/sugawarakenshin/30013-o-udon/src/app/main.cpp",
+  "output": "CMakeFiles/hexa_udon.dir/src/app/main.cpp.o"
+}
+]

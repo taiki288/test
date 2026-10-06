@@ -1,0 +1,2 @@
+/usr/bin/ar qc libhexa_udon_session.a CMakeFiles/hexa_udon_session.dir/src/session/session.cpp.o CMakeFiles/hexa_udon_session.dir/src/session/polling.cpp.o CMakeFiles/hexa_udon_session.dir/src/session/persistence.cpp.o
+/usr/bin/ranlib libhexa_udon_session.a

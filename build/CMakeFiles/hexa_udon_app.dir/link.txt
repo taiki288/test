@@ -1,0 +1,2 @@
+/usr/bin/ar qc libhexa_udon_app.a CMakeFiles/hexa_udon_app.dir/src/app/auto_client.cpp.o CMakeFiles/hexa_udon_app.dir/src/app/session_lock.cpp.o CMakeFiles/hexa_udon_app.dir/src/app/production_profile.cpp.o CMakeFiles/hexa_udon_app.dir/src/app/lan_worker.cpp.o
+/usr/bin/ranlib libhexa_udon_app.a
