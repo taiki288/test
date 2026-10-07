@@ -43,6 +43,12 @@ Json actions(const simulator::DayActionPlan& plan) {
     } out.push_back(row); } return out;
 }
 }
+std::optional<std::size_t> search_candidate_multiplier(const std::size_t size) {
+    if (size == 16) return 1;
+    if (size == 24) return 2;
+    if (size == 32) return 4;
+    return std::nullopt;
+}
 std::optional<DailyDeadlinePolicy> DailyDeadlinePolicy::for_size(std::size_t size) {
     if(size==16) return DailyDeadlinePolicy{16,Ms{1000},Ms{10000},Ms{8000},Ms{250}};
     if(size==24) return DailyDeadlinePolicy{24,Ms{2000},Ms{20000},Ms{8000},Ms{250}};
@@ -82,6 +88,14 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
     const OptimizerConfig& oc, OptimizerClock now, const DailyDeadlineStages& stages,
     bool run_improvement, std::chrono::milliseconds worker_configured_timeout) {
     DailyDeadlineResult result;
+    const auto multiplier = search_candidate_multiplier(policy.size).value_or(1);
+    auto effective_gc = gc;
+    auto effective_rc = rc;
+    auto effective_oc = oc;
+    effective_gc.maximum_candidate_evaluations *= multiplier;
+    effective_rc.maximum_candidate_evaluations *= multiplier;
+    effective_rc.maximum_rendezvous_candidates *= multiplier;
+    effective_oc.maximum_iterations *= multiplier;
     auto& r=result.record;
     const auto started=now();
     const auto remaining=[&] { return deadline ? std::max<std::int64_t>(0,std::chrono::duration_cast<Ms>(*deadline-now()).count()) : 0; };
@@ -94,19 +108,19 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
     const auto start_state=Json{{"agents",agents(in.daily.own_agents)},{"progress",progress(in.previous_progress)}};
     const auto snapshot=Json{{"day",in.daily.day},{"terrain",terrain},{"traffic",traffic},{"spots",spots}};
     const auto input_hash=hash(Json{{"snapshot",snapshot},{"state",start_state},{"types",types},
-        {"greedySeed",gc.seed},{"refuelSeed",rc.seed},{"greedyCandidates",gc.maximum_candidate_evaluations},
+        {"greedySeed",effective_gc.seed},{"refuelSeed",effective_rc.seed},{"greedyCandidates",effective_gc.maximum_candidate_evaluations},
         {"fuelLimit",in.match.fuel_limit},{"daySteps",in.match.day_steps},
         {"baselineMaxMs",policy.baseline_max.count()},
-        {"refuelCandidates",rc.maximum_candidate_evaluations},{"rendezvousCandidates",rc.maximum_rendezvous_candidates},
-        {"maximumRefuels",rc.maximum_refuels_per_patrol}});
+        {"refuelCandidates",effective_rc.maximum_candidate_evaluations},{"rendezvousCandidates",effective_rc.maximum_rendezvous_candidates},
+        {"maximumRefuels",effective_rc.maximum_refuels_per_patrol}});
     r={{"schemaVersion",1},{"policy",policy.identity()},{"day",in.daily.day},{"types",types},
        {"snapshotHash",hash(snapshot)},{"startStateHash",hash(start_state)},{"progressHash",hash(progress(in.previous_progress))},
        {"baselineInputHash",input_hash},{"remainingBudgetMs",remaining()},{"baselineRemainingMs",nullptr},
        {"hardPlanningDeadline",nullptr},{"effectiveStopPoint","shared-hard-planning-deadline"},
        {"reserveMeaning","optimizer-admission-and-fallback-guard-only"},{"dayStartRemainingMs",remaining()},
        {"baselineGreedyUs",0},{"baselineRefuelUs",0},{"baselineSimulatorUs",0},{"baselineWallUs",0},
-       {"plannerSeed",gc.seed},{"improvementSeed",oc.seed},{"baselineCandidateLimit",gc.maximum_candidate_evaluations},
-       {"refuelCandidateLimit",rc.maximum_candidate_evaluations},{"baselineEvaluatedCandidates",0},
+       {"plannerSeed",effective_gc.seed},{"improvementSeed",effective_oc.seed},{"baselineCandidateLimit",effective_gc.maximum_candidate_evaluations},
+       {"refuelCandidateLimit",effective_rc.maximum_candidate_evaluations},{"searchCandidateMultiplier",multiplier},{"baselineEvaluatedCandidates",0},
        {"improvementSimulatorUs",0},{"baselineTermination","not-started"},{"baselineFailureReason",""},{"baselineActionHash",nullptr},
        {"baselinePlanHash",nullptr},{"baselineEndStateHash",nullptr},{"baselineScore",nullptr},{"baselineReadiness",nullptr},
        {"baselineParity",{{"scope","same-day-start-state"},{"inputHash",input_hash},{"startStateHash",hash(start_state)},
@@ -166,12 +180,12 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
     const auto baseline_deadline=std::min(stop,baseline_start+policy.baseline_max);
     r["baselineCreatedAfterStartUs"]=micros(started);
     r["baselineDeadlineRemainingMs"]=std::chrono::duration_cast<Ms>(baseline_deadline-baseline_start).count();
-    auto stage_start=now(); auto greedy=stages.greedy(in,gc,baseline_deadline,now);
+    auto stage_start=now(); auto greedy=stages.greedy(in,effective_gc,baseline_deadline,now);
     r["baselineGreedyUs"]=micros(stage_start);
     if(!greedy) return fail("planner_failure","greedy planner failed");
     if(now()>=baseline_deadline || greedy.value().termination==planner::PlannerTermination::Deadline || greedy.value().termination==planner::PlannerTermination::Fallback)
         return fail("deadline_exhausted","greedy did not complete within baseline deadline");
-    stage_start=now(); auto refuel=stages.refuel(in,greedy.value(),rc,baseline_deadline,now);
+    stage_start=now(); auto refuel=stages.refuel(in,greedy.value(),effective_rc,baseline_deadline,now);
     r["baselineRefuelUs"]=micros(stage_start);
     if(!refuel) return fail("planner_failure","refuel planner failed");
     if(now()>=baseline_deadline || refuel.value().termination==planner::RefuelTermination::Deadline || refuel.value().termination==planner::RefuelTermination::Fallback)
@@ -222,7 +236,7 @@ DailyDeadlineResult run_daily_deadline_policy(const planner::PlannerInput& in,
         improvement_start = now();
         improvement_deadline = std::min(stop - reply_grace,
             improvement_start + Ms{improvement_budget});
-        auto config = oc;
+        auto config = effective_oc;
         config.prefer_daily_readiness_on_tie = true;
         r["improvementCreatedAfterStartUs"] = micros(started);
         r["improvementStarted"] = true;

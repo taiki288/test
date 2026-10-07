@@ -3,6 +3,8 @@
 #include <nlohmann/json.hpp>
 
 namespace hexa_udon::optimizer {
+[[nodiscard]] std::optional<std::size_t> search_candidate_multiplier(std::size_t size);
+
 struct DailyDeadlinePolicy {
     static constexpr const char* version = "daily-deadline-policy-v1";
     std::size_t size = 0;

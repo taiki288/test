@@ -17,6 +17,10 @@ int main() {
     if (core::hex_distance(distance_map, {9}, {1}) != 1) return 1;
     if (core::hex_distance(distance_map, {0}, {16}) != 2) return 1;
     if (core::hex_distance(distance_map, {0}, {27}) != 4) return 1;
+    if (optimizer::search_candidate_multiplier(16) != 1
+        || optimizer::search_candidate_multiplier(24) != 2
+        || optimizer::search_candidate_multiplier(32) != 4
+        || optimizer::search_candidate_multiplier(20).has_value()) return 1;
     if (optimizer::annealing_energy_delta({9, 100, 1000}, {10, 0, 0}) != -1.0) return 1;
     if (optimizer::annealing_energy_delta({10, 19, 1000}, {10, 20, 0}) != -1.0) return 1;
     if (optimizer::annealing_energy_delta({10, 20, 99}, {10, 20, 100}) != -1.0) return 1;
