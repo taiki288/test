@@ -18,6 +18,17 @@ int main() {
     if (core::hex_distance(distance_map, {0}, {16}) != 2) return 1;
     if (core::hex_distance(distance_map, {0}, {27}) != 4) return 1;
 
+    core::MatchConfig value_match{0, {60}, {20}, distance_map,
+        {{1, {1}, 1}, {2, {2}, 4}}, {{0}}, 20, 1, 1, 2};
+    core::DailyState value_daily{100, 0,
+        {{core::AgentKind::Patrol, {0}, 20}}, {}, {}};
+    simulator::MatchProgress value_progress;
+    optimizer::StructuredSolution value_solution{{{0, {}, {}}}, {}};
+    std::mt19937_64 value_random(30013);
+    if (!optimizer::apply_neighborhood(value_solution, optimizer::Neighborhood::AddSpot,
+            {value_match, value_daily, value_progress}, value_random)) return 1;
+    if (value_solution.patrol_routes[0].spot_indices != std::vector<std::size_t>{1}) return 1;
+
     core::MapDefinition map = std::move(core::MapDefinition::create(16, 16,
         std::vector<core::Terrain>(256, core::Terrain::Plain)).value());
     core::MatchConfig match{0, {60}, {100}, map, {},
