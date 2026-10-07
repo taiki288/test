@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <vector>
@@ -107,6 +108,8 @@ private:
 [[nodiscard]] protocol::Result<std::vector<core::AgentKind>> parse_kind_list(
     const std::string& text);
 
+[[nodiscard]] std::string classify_worker_termination(const std::string& termination);
+
 class AutoCompetitionClient {
 public:
     AutoCompetitionClient(protocol::ProconApiClient& api, AutoClientConfig config,
@@ -129,7 +132,8 @@ private:
     void print_kinds(const std::vector<core::AgentKind>& kinds);
     void print_day_summary(const core::MatchConfig& config, const core::DailyState& daily,
                            const session::SubmissionRecord& record,
-                           const simulator::MatchProgress& progress);
+                           const simulator::MatchProgress& progress,
+                           const nlohmann::json& planning_record = {});
 
     protocol::ProconApiClient& api_;
     AutoClientConfig config_;
