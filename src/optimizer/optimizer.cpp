@@ -319,6 +319,15 @@ OrdinalResult score_ordinal(const planner::OfficialScore& score, const ScoreBoun
     return OrdinalResult::success(value);
 }
 
+OptimizationPhase optimization_phase(
+    const planner::OfficialScore& score, const ScoreBounds& bounds) noexcept {
+    if (static_cast<std::uint64_t>(std::max<std::int64_t>(0, score.total_unique_brands))
+        < bounds.total_unique_brands) return OptimizationPhase::TotalUniqueBrands;
+    if (static_cast<std::uint64_t>(std::max<std::int64_t>(0, score.cumulative_daily_unique_brands))
+        < bounds.cumulative_daily_unique_brands) return OptimizationPhase::DailyUniqueBrands;
+    return OptimizationPhase::TotalBowls;
+}
+
 StructuredSolution solution_from_baseline(const planner::PlannerInput& input,
     const planner::PlannerResult& greedy, const planner::RefuelPlannerResult& refuel) {
     StructuredSolution result;
@@ -593,7 +602,6 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
     std::array<double,neighborhood_count> weights=config.neighborhood_weights;
     if(std::all_of(weights.begin(),weights.end(),[](double x){return x<=0.0;}))weights.fill(1.0);
     for(auto& x:weights)if(!std::isfinite(x)||x<0.0)x=0.0;
-    std::discrete_distribution<std::size_t> select(weights.begin(),weights.end());
     const auto bounds=score_bounds(input); std::size_t invalid_run=0;
     bool deadline_hit = false;
     bool best_is_candidate = false;
@@ -602,7 +610,20 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
     result.termination=config.maximum_iterations==0?OptimizerTermination::IterationLimit:OptimizerTermination::Completed;
     for(std::size_t iteration=0;iteration<config.maximum_iterations;++iteration){
         if(now()>=deadline){result.termination=OptimizerTermination::Deadline;deadline_hit=true;break;}
-        result.iterations=iteration+1; const auto neighborhood=static_cast<Neighborhood>(select(random));
+        result.iterations=iteration+1;
+        auto phase_weights = weights;
+        const auto phase = optimization_phase(current.score, bounds);
+        if (phase == OptimizationPhase::TotalUniqueBrands) {
+            phase_weights[static_cast<std::size_t>(Neighborhood::AddUncollectedBrand)] *= 4.0;
+        } else if (phase == OptimizationPhase::DailyUniqueBrands) {
+            phase_weights[static_cast<std::size_t>(Neighborhood::AddSpot)] *= 3.0;
+            phase_weights[static_cast<std::size_t>(Neighborhood::RelocateWithin)] *= 2.0;
+        } else {
+            phase_weights[static_cast<std::size_t>(Neighborhood::AddSpot)] *= 4.0;
+            phase_weights[static_cast<std::size_t>(Neighborhood::ReplaceSameBrand)] *= 4.0;
+        }
+        std::discrete_distribution<std::size_t> select(phase_weights.begin(),phase_weights.end());
+        const auto neighborhood=static_cast<Neighborhood>(select(random));
         auto& stats=result.neighborhoods[static_cast<std::size_t>(neighborhood)]; ++stats.generated; ++result.generated_candidates;
         auto proposed=current_solution;
         std::string mutation_kind;

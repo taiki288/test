@@ -17,6 +17,13 @@ int main() {
     if (core::hex_distance(distance_map, {9}, {1}) != 1) return 1;
     if (core::hex_distance(distance_map, {0}, {16}) != 2) return 1;
     if (core::hex_distance(distance_map, {0}, {27}) != 4) return 1;
+    const optimizer::ScoreBounds phase_bounds{10, 30, 100};
+    if (optimizer::optimization_phase({9, 30, 100}, phase_bounds)
+        != optimizer::OptimizationPhase::TotalUniqueBrands) return 1;
+    if (optimizer::optimization_phase({10, 29, 100}, phase_bounds)
+        != optimizer::OptimizationPhase::DailyUniqueBrands) return 1;
+    if (optimizer::optimization_phase({10, 30, 99}, phase_bounds)
+        != optimizer::OptimizationPhase::TotalBowls) return 1;
 
     core::MapDefinition map = std::move(core::MapDefinition::create(16, 16,
         std::vector<core::Terrain>(256, core::Terrain::Plain)).value());
