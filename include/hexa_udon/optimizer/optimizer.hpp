@@ -33,6 +33,7 @@ enum class Neighborhood : std::uint8_t {
     MoveTaskBetweenSupplies,
     RemoveRendezvous,
     AddRendezvous,
+    ReplaceAndRelocate,
     Count,
 };
 
@@ -60,6 +61,11 @@ struct ScoreBounds {
     std::uint64_t total_bowls = 0;
 };
 
+enum class OptimizationPhase { TotalUniqueBrands, DailyUniqueBrands, TotalBowls };
+
+[[nodiscard]] OptimizationPhase optimization_phase(
+    const planner::OfficialScore& score, const ScoreBounds& bounds) noexcept;
+
 enum class OrdinalError { NegativeScore, OutOfBounds, Overflow };
 
 struct OrdinalFailure { OrdinalError code; std::string message; };
@@ -78,6 +84,12 @@ private:
 
 [[nodiscard]] OrdinalResult score_ordinal(
     const planner::OfficialScore& score, const ScoreBounds& bounds);
+
+// Search-only delta. Final adoption continues to use the exact official
+// lexicographic comparison; this keeps annealing temperatures scale-stable.
+[[nodiscard]] double annealing_energy_delta(
+    const planner::OfficialScore& candidate,
+    const planner::OfficialScore& current) noexcept;
 
 struct NeighborhoodStatistics {
     std::size_t generated = 0;

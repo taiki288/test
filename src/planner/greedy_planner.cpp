@@ -143,17 +143,10 @@ daily_readiness(const core::MatchConfig &match, const core::DailyState &daily,
                 const simulator::DaySimulationResult &simulation,
                 const std::vector<std::vector<std::size_t>> &visited_spots) {
   DailyReadiness result;
-  std::vector<bool> visited(match.spots.size(), false);
-  for (const auto &visits : visited_spots) {
-    for (const auto spot : visits) {
-      if (spot < visited.size())
-        visited[spot] = true;
-    }
-  }
+  // Every spot is replenished at the start of the next day. Estimate how many
+  // balls can be opened from the end state, including spots visited today.
   for (std::size_t spot = 0; spot < match.spots.size(); ++spot) {
-    if (visited[spot])
-      continue;
-    std::int64_t best = std::numeric_limits<std::int64_t>::max();
+    std::int64_t reachable_patrols = 0;
     for (std::size_t agent = 0; agent < simulation.end_agents.size(); ++agent) {
       if (simulation.end_agents[agent].kind != core::AgentKind::Patrol)
         continue;
@@ -162,10 +155,10 @@ daily_readiness(const core::MatchConfig &match, const core::DailyState &daily,
                         match.spots[spot].position);
       // Two steps per plain edge is a conservative, future-road-free estimate.
       if (distance * 2 <= simulation.end_agents[agent].fuel)
-        best = std::min(best, distance);
+        ++reachable_patrols;
     }
-    if (best != std::numeric_limits<std::int64_t>::max())
-      ++result.uncollected_spot_reachability;
+    result.uncollected_spot_reachability += std::min<std::int64_t>(
+        reachable_patrols, match.spots[spot].max_stock);
   }
   std::vector<std::size_t> patrols;
   std::vector<std::size_t> supplies;
@@ -202,6 +195,7 @@ daily_readiness(const core::MatchConfig &match, const core::DailyState &daily,
     result.deterministic_order.push_back(agent.fuel);
   }
   static_cast<void>(daily);
+  static_cast<void>(visited_spots);
   return result;
 }
 
@@ -320,9 +314,30 @@ make_greedy_plan(const PlannerInput &input, const PlannerConfig &config,
     return PlannerOutcome::success(std::move(fallback));
   }
   auto pathfinder = std::move(pathfinder_result).value();
-  std::set<std::size_t> assigned_spots;
+  std::vector<core::Quantity> assigned_spot_counts(input.match.spots.size(), 0);
   const auto day_steps =
       input.match.day_steps[static_cast<std::size_t>(input.daily.day)];
+  const auto rebuild_route = [&](const std::size_t agent,
+                                 const std::vector<std::size_t> &spots,
+                                 const std::vector<pathfinding::RouteObjective> &objectives)
+      -> std::optional<AgentRoute> {
+    AgentRoute route{input.daily.own_agents[agent].position, {}, spots, objectives, 0, 0, 0};
+    for (std::size_t leg = 0; leg < spots.size(); ++leg) {
+      const auto found = pathfinder.find_route(route.destination,
+          input.match.spots[spots[leg]].position, objectives[leg]);
+      if (!found || !found.value()) return std::nullopt;
+      const auto &segment = *found.value();
+      route.travel_steps += segment.cost.travel_steps;
+      route.fuel += segment.cost.patrol_fuel;
+      route.edges += segment.cost.edge_count;
+      if (route.travel_steps > day_steps
+          || route.fuel > input.daily.own_agents[agent].fuel) return std::nullopt;
+      route.directions.insert(route.directions.end(), segment.directions.begin(),
+                              segment.directions.end());
+      route.destination = segment.destination;
+    }
+    return route;
+  };
 
   while (true) {
     if (now() >= deadline) {
@@ -338,61 +353,35 @@ make_greedy_plan(const PlannerInput &input, const PlannerConfig &config,
       }
       for (std::size_t spot = 0;
            spot < input.match.spots.size() && !limit_reached; ++spot) {
-        if (assigned_spots.contains(spot)) {
+        if (std::find(best.routes[agent].spots.begin(), best.routes[agent].spots.end(), spot)
+                != best.routes[agent].spots.end()
+            || assigned_spot_counts[spot] >= input.match.spots[spot].max_stock) {
           continue;
         }
         for (const auto objective :
              {pathfinding::RouteObjective::Fastest,
               pathfinding::RouteObjective::FuelEfficient}) {
-          if (now() >= deadline) {
-            termination = PlannerTermination::Deadline;
-            limit_reached = true;
-            break;
-          }
-          if (evaluated >= config.maximum_candidate_evaluations) {
-            termination = PlannerTermination::EvaluationLimit;
-            limit_reached = true;
-            break;
-          }
-          auto route = pathfinder.find_route(best.routes[agent].destination,
-                                             input.match.spots[spot].position,
-                                             objective);
-          if (!route) {
-            diagnostic = route.error().message;
-            continue;
-          }
-          if (!route.value().has_value()) {
-            continue;
-          }
-          const auto &segment = *route.value();
-          if (objective == pathfinding::RouteObjective::FuelEfficient) {
-            const auto fastest =
-                pathfinder.find_route(best.routes[agent].destination,
-                                      input.match.spots[spot].position,
-                                      pathfinding::RouteObjective::Fastest);
-            if (fastest && fastest.value().has_value() &&
-                fastest.value()->directions == segment.directions) {
-              continue;
+          for (std::size_t insertion = 0;
+               insertion <= best.routes[agent].spots.size() && !limit_reached;
+               ++insertion) {
+            if (now() >= deadline) {
+              termination = PlannerTermination::Deadline;
+              limit_reached = true;
+              break;
             }
-          }
-          auto candidate_routes = best.routes;
-          auto &candidate_agent = candidate_routes[agent];
-          const auto new_time =
-              candidate_agent.travel_steps + segment.cost.travel_steps;
-          const auto new_fuel = candidate_agent.fuel + segment.cost.patrol_fuel;
-          if (new_time > day_steps ||
-              new_fuel > input.daily.own_agents[agent].fuel) {
-            continue;
-          }
-          candidate_agent.destination = input.match.spots[spot].position;
-          candidate_agent.directions.insert(candidate_agent.directions.end(),
-                                            segment.directions.begin(),
-                                            segment.directions.end());
-          candidate_agent.spots.push_back(spot);
-          candidate_agent.objectives.push_back(objective);
-          candidate_agent.travel_steps = new_time;
-          candidate_agent.fuel = new_fuel;
-          candidate_agent.edges += segment.cost.edge_count;
+            if (evaluated >= config.maximum_candidate_evaluations) {
+              termination = PlannerTermination::EvaluationLimit;
+              limit_reached = true;
+              break;
+            }
+            auto spots = best.routes[agent].spots;
+            auto objectives = best.routes[agent].objectives;
+            spots.insert(spots.begin() + static_cast<std::ptrdiff_t>(insertion), spot);
+            objectives.insert(objectives.begin() + static_cast<std::ptrdiff_t>(insertion), objective);
+            auto rebuilt = rebuild_route(agent, spots, objectives);
+            if (!rebuilt) continue;
+            auto candidate_routes = best.routes;
+            candidate_routes[agent] = std::move(*rebuilt);
           auto plan = make_plan(input, candidate_routes);
           ++evaluated;
           auto simulation = simulate(input, plan);
@@ -426,14 +415,17 @@ make_greedy_plan(const PlannerInput &input, const PlannerConfig &config,
                better_candidate(candidate, *round_best))) {
             round_best = std::move(candidate);
           }
+          }
         }
       }
     }
     if (round_best.has_value()) {
       best = std::move(*round_best);
-      assigned_spots.clear();
+      std::fill(assigned_spot_counts.begin(), assigned_spot_counts.end(), 0);
       for (const auto &route : best.routes) {
-        assigned_spots.insert(route.spots.begin(), route.spots.end());
+        for (const auto spot : route.spots) {
+          ++assigned_spot_counts[spot];
+        }
       }
       ++accepted;
       termination = PlannerTermination::Completed;
