@@ -28,7 +28,8 @@ public:
     void wait_until(protocol::SteadyTime time) override;
 };
 
-[[nodiscard]] protocol::Result<core::MatchConfig> poll_setting_until_ready(
+// Initial-setting helper only. Post-type waiting must use GET / via fetch_state.
+[[nodiscard]] protocol::Result<core::MatchConfig> poll_initial_setting_until_ready(
     protocol::ProconApiClient& api, PollClock& clock, protocol::SteadyTime deadline,
     const PollingPolicy& policy = {});
 

@@ -207,6 +207,8 @@ SubmissionClassification classification_for(const protocol::Error& error) {
             return SubmissionClassification::AuthenticationFailed;
         case protocol::ErrorCode::AccessTime:
             return SubmissionClassification::AccessTimeError;
+        case protocol::ErrorCode::Http429:
+            return SubmissionClassification::AccessTimeError;
         case protocol::ErrorCode::UnknownResponse:
             return SubmissionClassification::UnknownResponse;
         default:
@@ -243,6 +245,12 @@ void SessionController::log_transition(
         entry.level = protocol::OperationLogEntry::Level::Warning;
     entry.state_transition = std::to_string(static_cast<int>(from)) + "->" +
                              std::to_string(static_cast<int>(to));
+    if (result == "agent-post-unknown" || result == "action-post-outcome-unknown") {
+        entry.response_classification = "unknown-post-outcome";
+        entry.submission_attempted = std::nullopt;
+    } else if (to == SessionState::RecoveryRequired) {
+        entry.response_classification = "recovery-required";
+    }
     if (current_day_) entry.day = current_day_->day;
     logger_->write(entry);
 }
@@ -293,6 +301,12 @@ protocol::Result<bool> SessionController::submit_agent_kinds(
     const std::vector<core::AgentKind>& kinds,
     std::optional<protocol::SteadyTime> deadline) {
     std::lock_guard submission_lock(submission_mutex_);
+    if (state_ == SessionState::RecoveryRequired) {
+        return protocol::Result<bool>::failure(
+            {protocol::ErrorCode::Conflict,
+             "recovery is required; automatic type resubmission is disabled",
+             std::nullopt, false});
+    }
     if (kinds.size() != config_.initial_agent_positions.size()) {
         return protocol::Result<bool>::failure(
             {protocol::ErrorCode::CoreValidation, "agent kind count does not match setting"});
@@ -308,9 +322,9 @@ protocol::Result<bool> SessionController::submit_agent_kinds(
         return protocol::Result<bool>::failure(
             {protocol::ErrorCode::Conflict, "different agent kinds were already submitted"});
     }
-    auto result = api_.post_agent_kinds(kinds, deadline);
+    auto result = api_.post_agent_kinds(kinds, deadline, "type-submit");
     if (!result) {
-        if (result.error().code == protocol::ErrorCode::UnknownResponse) {
+        if (!result.error().submission_attempted.has_value()) {
             snapshot_.agent_kinds_unknown = true;
             const auto previous = state_;
             state_ = SessionState::RecoveryRequired;
@@ -327,6 +341,23 @@ protocol::Result<bool> SessionController::submit_agent_kinds(
 }
 
 void SessionController::record_daily_planning(nlohmann::json diagnostic) {
+    if (diagnostic.is_object() && diagnostic.contains("day")) {
+        const auto day = diagnostic.value("day", core::Quantity{-1});
+        for (auto iterator = snapshot_.daily_planning_diagnostics.begin();
+             iterator != snapshot_.daily_planning_diagnostics.end(); ++iterator) {
+            if (!iterator->is_object() || iterator->value("day", core::Quantity{-2}) != day)
+                continue;
+            *iterator = std::move(diagnostic);
+            auto duplicate = iterator + 1;
+            while (duplicate != snapshot_.daily_planning_diagnostics.end()) {
+                if (duplicate->is_object() && duplicate->value("day", core::Quantity{-2}) == day)
+                    duplicate = snapshot_.daily_planning_diagnostics.erase(duplicate);
+                else
+                    ++duplicate;
+            }
+            return;
+        }
+    }
     snapshot_.daily_planning_diagnostics.push_back(std::move(diagnostic));
 }
 bool SessionController::bind_production_policy(const nlohmann::json& identity) {
@@ -418,13 +449,23 @@ protocol::Result<SubmissionRecord> SessionController::submit_plan(
     std::optional<protocol::SteadyTime> deadline,
     std::optional<PlannerSubmissionMetadata> planner) {
     std::lock_guard submission_lock(submission_mutex_);
+    if (state_ == SessionState::RecoveryRequired) {
+        return protocol::Result<SubmissionRecord>::failure(
+            {protocol::ErrorCode::Conflict,
+             "recovery is required; automatic action resubmission is disabled",
+             std::nullopt, false});
+    }
     auto simulation = simulate(plan);
     if (!simulation) {
-        return protocol::Result<SubmissionRecord>::failure(simulation.error());
+        auto error = simulation.error();
+        error.submission_attempted = false;
+        return protocol::Result<SubmissionRecord>::failure(std::move(error));
     }
     auto encoded = protocol::encode_actions(plan);
     if (!encoded) {
-        return protocol::Result<SubmissionRecord>::failure(encoded.error());
+        auto error = encoded.error();
+        error.submission_attempted = false;
+        return protocol::Result<SubmissionRecord>::failure(std::move(error));
     }
 
     SubmissionRecord record;
@@ -439,28 +480,59 @@ protocol::Result<SubmissionRecord> SessionController::submit_plan(
     record.planner = std::move(planner);
 
     if (dry_run) {
+        record.submission_attempted = false;
         record.finished_at_ms = now_milliseconds();
         record.classification = SubmissionClassification::DryRun;
         snapshot_.submissions.push_back(record);
         return protocol::Result<SubmissionRecord>::success(record);
     }
 
-    auto submitted = api_.post_actions(plan, deadline);
+    protocol::OperationLogEntry pending;
+    pending.timestamp_utc = protocol::utc_timestamp();
+    pending.operation = "daily-submit";
+    pending.method = "POST";
+    pending.path = "/";
+    pending.day = record.day;
+    pending.local_submission_id = record.local_id;
+    pending.phase = "daily-submit";
+    pending.result = "not-started";
+    pending.response_classification = "pending";
+    pending.submission_attempted = false;
+    logger_->write(pending);
+
+    auto submitted = api_.post_actions(plan, deadline, "daily-submit", record.local_id);
     record.finished_at_ms = now_milliseconds();
     if (!submitted) {
+        record.submission_attempted = submitted.error().submission_attempted;
         record.classification = classification_for(submitted.error());
+        pending.result = record.submission_attempted.has_value()
+            ? (*record.submission_attempted ? "post-error" : "not-sent")
+            : "unknown-post-outcome";
+        pending.response_classification = record.submission_attempted == false
+            ? "pre-submit-error" : (record.submission_attempted == true
+                ? "post-error" : "unknown-post-outcome");
+        pending.stop_reason = submitted.error().message;
+        pending.submission_attempted = record.submission_attempted;
+        logger_->update(pending);
         snapshot_.submissions.push_back(record);
-        if (record.classification == SubmissionClassification::UnknownResponse) {
+        if (!record.submission_attempted.has_value()) {
             const auto previous = state_;
             state_ = SessionState::RecoveryRequired;
-            log_transition(previous, state_, "action-post-unknown");
+            log_transition(previous, state_, "action-post-outcome-unknown");
         }
         return protocol::Result<SubmissionRecord>::failure(submitted.error());
     }
 
     record.http_status = 200;
     record.revision = submitted.value();
+    record.submission_attempted = true;
     record.classification = SubmissionClassification::Accepted;
+    pending.result = "accepted";
+    pending.response_classification = "success";
+    pending.http_status = record.http_status;
+    pending.revision = record.revision;
+    pending.submission_attempted = true;
+    logger_->update(pending);
     snapshot_.submissions.push_back(record);
     auto existing = snapshot_.accepted_days.find(record.day);
     if (existing == snapshot_.accepted_days.end() || submitted.value() > existing->second.revision) {
@@ -481,6 +553,7 @@ protocol::Result<SubmissionRecord> SessionController::submit_plan(
     log.revision = record.revision;
     log.elapsed = std::chrono::milliseconds{record.finished_at_ms - record.started_at_ms};
     log.result = "accepted";
+    log.submission_attempted = true;
     log.state_transition = std::to_string(static_cast<int>(previous)) + "->" +
                            std::to_string(static_cast<int>(state_));
     logger_->write(log);
@@ -543,6 +616,8 @@ protocol::Result<bool> SessionController::save(const std::filesystem::path& path
                               {"simulation", summary_json(record.simulation)}};
         persisted_record["httpStatus"] = record.http_status ? Json(*record.http_status) : Json(nullptr);
         persisted_record["revision"] = record.revision ? Json(*record.revision) : Json(nullptr);
+        persisted_record["submissionAttempted"] = record.submission_attempted
+            ? Json(*record.submission_attempted) : Json(nullptr);
         persisted_record["planner"] = record.planner ? planner_json(*record.planner) : Json(nullptr);
         root["submissions"].push_back(std::move(persisted_record));
     }
@@ -735,6 +810,8 @@ protocol::Result<bool> SessionController::restore(const std::filesystem::path& p
             if (!value.at("revision").is_null()) {
                 record.revision = value.at("revision").get<std::int32_t>();
             }
+            if (value.contains("submissionAttempted") && !value.at("submissionAttempted").is_null())
+                record.submission_attempted = value.at("submissionAttempted").get<bool>();
             const auto classification = value.at("classification").get<std::int32_t>();
             if (classification < 0 ||
                 classification > static_cast<std::int32_t>(SubmissionClassification::DryRun)) {
@@ -753,7 +830,13 @@ protocol::Result<bool> SessionController::restore(const std::filesystem::path& p
         }
         snapshot_ = std::move(loaded);
         rebuild_progress();
-        state_ = SessionState::WaitingForDay;
+        const bool unknown_submission = snapshot_.agent_kinds_unknown
+            || std::any_of(snapshot_.submissions.begin(), snapshot_.submissions.end(),
+                           [](const auto& submission) {
+                               return !submission.submission_attempted.has_value();
+                           });
+        state_ = unknown_submission ? SessionState::RecoveryRequired
+                                    : SessionState::WaitingForDay;
         return protocol::Result<bool>::success(true);
     } catch (const Json::exception& error) {
         return protocol::Result<bool>::failure(

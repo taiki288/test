@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <vector>
@@ -63,7 +64,8 @@ struct AutoClientConfig {
     std::size_t required_agent_count = 0;
     std::vector<LanWorkerEndpoint> lan_workers;
     std::string lan_worker_secret_environment;
-    std::chrono::milliseconds lan_worker_timeout{250};
+    // Zero selects the size-specific Phase 50 cap; a positive value is an explicit override.
+    std::chrono::milliseconds lan_worker_timeout{0};
 };
 
 struct RunResult {
@@ -106,6 +108,8 @@ private:
 [[nodiscard]] protocol::Result<std::vector<core::AgentKind>> parse_kind_list(
     const std::string& text);
 
+[[nodiscard]] std::string classify_worker_termination(const std::string& termination);
+
 class AutoCompetitionClient {
 public:
     AutoCompetitionClient(protocol::ProconApiClient& api, AutoClientConfig config,
@@ -117,7 +121,9 @@ public:
     [[nodiscard]] RunResult run();
 
 private:
-    [[nodiscard]] protocol::Result<core::MatchConfig> fetch_setting();
+    [[nodiscard]] protocol::Result<core::MatchConfig> fetch_setting(
+        const std::string& phase = "registration",
+        std::optional<protocol::SteadyTime> deadline = std::nullopt);
     [[nodiscard]] protocol::Result<core::DailyState> fetch_state(
         const core::MatchConfig& config,
         std::optional<core::Quantity> current_day,
@@ -126,7 +132,8 @@ private:
     void print_kinds(const std::vector<core::AgentKind>& kinds);
     void print_day_summary(const core::MatchConfig& config, const core::DailyState& daily,
                            const session::SubmissionRecord& record,
-                           const simulator::MatchProgress& progress);
+                           const simulator::MatchProgress& progress,
+                           const nlohmann::json& planning_record = {});
 
     protocol::ProconApiClient& api_;
     AutoClientConfig config_;
