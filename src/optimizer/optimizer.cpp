@@ -459,7 +459,20 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
         for (std::size_t x = 0; x < input.match.spots.size(); ++x)
             if (x != a.spot_indices[i] && input.match.spots[x].brand == input.match.spots[a.spot_indices[i]].brand) same.push_back(x);
         if (same.empty()) return false;
-        a.spot_indices[i] = same[pick(random, same.size())];
+        const auto before = i == 0 ? input.daily.own_agents[a.agent_index].position
+                                   : input.match.spots[a.spot_indices[i - 1]].position;
+        const auto after = i + 1 < a.spot_indices.size()
+            ? std::optional<core::CellIndex>{input.match.spots[a.spot_indices[i + 1]].position}
+            : std::nullopt;
+        a.spot_indices[i] = *std::max_element(same.begin(), same.end(), [&](const auto left, const auto right) {
+            const auto detour = [&](const auto spot) {
+                auto distance = core::hex_distance(input.match.map, before, input.match.spots[spot].position);
+                if (after) distance += core::hex_distance(input.match.map, input.match.spots[spot].position, *after);
+                return distance;
+            };
+            return std::tuple{input.match.spots[left].max_stock, -detour(left), -static_cast<std::int64_t>(left)}
+                < std::tuple{input.match.spots[right].max_stock, -detour(right), -static_cast<std::int64_t>(right)};
+        });
         return true;
     }
     case Neighborhood::MoveBetweenPatrols:
