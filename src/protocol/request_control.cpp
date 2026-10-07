@@ -1,4 +1,5 @@
 #include "hexa_udon/protocol/request_control.hpp"
+#include "hexa_udon/protocol/file_security.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -100,12 +101,22 @@ std::string utc_timestamp() {
 
 FileOperationLogger::FileOperationLogger(
     std::filesystem::path path, OperationLogEntry::Level minimum_level)
-    : path_(std::move(path)), minimum_level_(minimum_level) {}
+    : path_(std::move(path)), minimum_level_(minimum_level) {
+    std::error_code error;
+    if (!path_.parent_path().empty())
+        std::filesystem::create_directories(path_.parent_path(), error);
+    if (!error && !std::filesystem::exists(path_)) {
+        std::ofstream create(path_, std::ios::app);
+        create.close();
+    }
+    if (!error) static_cast<void>(secure_file(path_));
+}
 
 void FileOperationLogger::write(const OperationLogEntry& entry) noexcept {
     try {
         if (entry.level < minimum_level_) return;
         std::lock_guard lock(mutex_);
+        static_cast<void>(secure_file(path_));
         std::ofstream output(path_, std::ios::app);
         if (output) {
             output << entry_json(entry).dump() << '\n';
@@ -146,8 +157,10 @@ void FileOperationLogger::update(const OperationLogEntry& entry) noexcept {
         for (const auto& row : rows) output << row.dump() << '\n';
         output.flush();
         output.close();
+        static_cast<void>(secure_file(temporary));
         std::error_code error;
         std::filesystem::rename(temporary, path_, error);
+        if (!error) static_cast<void>(secure_file(path_));
         if (error) std::filesystem::remove(temporary, error);
     } catch (...) {
         // Logging must never stop competition processing.

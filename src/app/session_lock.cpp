@@ -1,4 +1,5 @@
 #include "hexa_udon/app/auto_client.hpp"
+#include "hexa_udon/protocol/file_security.hpp"
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -34,6 +35,10 @@ protocol::Result<SessionDirectoryLock> SessionDirectoryLock::acquire(
     if (error) {
         return protocol::Result<SessionDirectoryLock>::failure(
             {protocol::ErrorCode::Persistence, "cannot create session directory: " + error.message()});
+    }
+    if (!protocol::secure_directory(directory)) {
+        return protocol::Result<SessionDirectoryLock>::failure(
+            {protocol::ErrorCode::Persistence, "cannot secure session directory"});
     }
     const auto path = directory / ".execute.lock";
     const int descriptor = ::open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
