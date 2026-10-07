@@ -18,6 +18,19 @@ int main() {
     if (core::hex_distance(distance_map, {0}, {16}) != 2) return 1;
     if (core::hex_distance(distance_map, {0}, {27}) != 4) return 1;
 
+    auto insertion_map = std::move(core::MapDefinition::create(8, 8,
+        std::vector<core::Terrain>(64, core::Terrain::Plain)).value());
+    core::MatchConfig insertion_match{0, {60}, {6}, insertion_map,
+        {{1, {8}, 1}, {2, {10}, 1}}, {{0}}, 20, 1, 1, 2};
+    core::DailyState insertion_daily{100, 0,
+        {{core::AgentKind::Patrol, {0}, 20}}, {}, {}};
+    simulator::MatchProgress insertion_progress;
+    insertion_progress.acquired_brands.insert(1);
+    const auto insertion_plan = planner::make_greedy_plan(
+        {insertion_match, insertion_daily, insertion_progress}, {40, 30013},
+        std::chrono::steady_clock::time_point::max());
+    if (!insertion_plan || insertion_plan.value().simulation.total_balls != 2) return 1;
+    if (insertion_plan.value().visited_spots[0] != std::vector<std::size_t>({0, 1})) return 1;
     auto stock_map = std::move(core::MapDefinition::create(2, 2,
         std::vector<core::Terrain>(4, core::Terrain::Plain)).value());
     core::MatchConfig stock_match{0, {60}, {2}, stock_map,
