@@ -1,5 +1,6 @@
 #include "hexa_udon/protocol/request_id_digest.hpp"
 #include "hexa_udon/app/lan_worker.hpp"
+#include "hexa_udon/app/auto_client.hpp"
 
 #include <cassert>
 #include <cstdlib>
@@ -48,6 +49,12 @@ int main() {
         == "auth-protocol-mismatch");
     require(hexa_udon::app::classify_worker_failure("worker reply malformed", false)
         == "frame-decode-failure");
+    require(hexa_udon::app::classify_worker_termination("completed") == "candidate");
+    require(hexa_udon::app::classify_worker_termination("iteration_limit") == "candidate");
+    require(hexa_udon::app::classify_worker_termination("deadline_exhausted_best_available") == "candidate");
+    require(hexa_udon::app::classify_worker_termination("deadline_exhausted") == "deadline-exhausted");
+    require(hexa_udon::app::classify_worker_termination("fallback") == "fallback");
+    require(hexa_udon::app::classify_worker_termination("unexpected") == "termination-invalid");
 
     using hexa_udon::protocol::request_id_digest_or_missing;
     const auto make_reply = [](int index, const char* termination,
@@ -82,6 +89,9 @@ int main() {
     const auto local_deadline = make_reply(0, "deadline_exhausted_best_available", "passed", "baseline-retained");
     require(local_deadline.at("workerBestCandidateAtLocalDeadline") == true);
     require(local_deadline.at("workerBestCandidateStrictVerified") == true);
+    const auto fallback = make_reply(0, "fallback", "passed", "baseline-retained");
+    require(hexa_udon::app::classify_worker_termination(fallback.at("termination")) == "fallback");
+    require(fallback.at("workerTermination") == "fallback");
 
     const auto timeout = make_reply(1, "timeout", "not-evaluated", "baseline-retained");
     require(timeout.at("termination") == "timeout");

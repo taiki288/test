@@ -40,4 +40,23 @@ int main() {
     if (result.record.value("candidateSource", "") != "baseline") return 1;
     if (result.record.value("adoptionReason", "") != "baseline-retained") return 1;
     if (result.record.value("replyGraceMs", 0) != 100) return 1;
+
+    auto fallback_stages = test::base_stages(base_sim);
+    fallback_stages.worker = [](const planner::PlannerInput&, const planner::PlannerResult&,
+                                const planner::RefuelPlannerResult&, const simulator::DaySimulationResult&,
+                                protocol::SteadyTime, std::chrono::milliseconds, optimizer::OptimizerClock) {
+        optimizer::DailyDeadlineStages::WorkerResult fallback_result;
+        fallback_result.reason = "worker-fallback";
+        fallback_result.record = {
+            {"workerObservations", nlohmann::json::array({nlohmann::json{
+                {"termination", "fallback"}, {"workerTermination", "fallback"},
+                {"rejectionReason", "fallback"}, {"adoption", "baseline-retained"}}})}};
+        return fallback_result;
+    };
+    const auto fallback_result = optimizer::run_daily_deadline_policy(input, test::policy(),
+        protocol::SteadyTime{} + std::chrono::seconds{2}, {4, 30013}, {4, 4, 2, 30013}, {},
+        [] { return protocol::SteadyTime{}; }, fallback_stages, true, std::chrono::milliseconds{1000});
+    if (fallback_result.record.value("candidateSource", "") != "baseline") return 1;
+    if (fallback_result.record.value("adoptionReason", "") != "baseline-retained") return 1;
+    if (fallback_result.record.value("workerFallbackReason", "") != "worker-fallback") return 1;
 }

@@ -16,8 +16,18 @@
 #include <future>
 #include <sstream>
 #include <thread>
+#include <numeric>
 
 namespace hexa_udon::app {
+
+std::string classify_worker_termination(const std::string& termination) {
+    if (termination == "completed" || termination == "iteration_limit"
+        || termination == "deadline_exhausted_best_available") return "candidate";
+    if (termination == "deadline_exhausted") return "deadline-exhausted";
+    if (termination == "fallback") return "fallback";
+    return "termination-invalid";
+}
+
 namespace {
 
 bool retryable(protocol::ErrorCode code) {
@@ -96,6 +106,14 @@ std::string type_identity(const std::vector<core::AgentKind>& kinds) {
     std::string encoded;
     for (const auto kind : kinds) encoded += std::to_string(core::to_int(kind));
     return stable_hash(encoded);
+}
+
+const char* agent_kind_name(const core::AgentKind kind) noexcept {
+    switch (kind) {
+        case core::AgentKind::Patrol: return "patrol";
+        case core::AgentKind::Supply: return "supply";
+    }
+    return "unknown";
 }
 
 std::string daily_snapshot_identity(const core::MatchConfig& config,
@@ -447,25 +465,49 @@ void AutoCompetitionClient::print_kinds(const std::vector<core::AgentKind>& kind
 
 void AutoCompetitionClient::print_day_summary(
     const core::MatchConfig& config, const core::DailyState& daily,
-    const session::SubmissionRecord& record, const simulator::MatchProgress& progress) {
-    const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
-        unix_time(daily.ends_at) - clock_.wall_now()).count();
-    output_ << "daily-end day=" << daily.day << " score=";
-    if (record.planner && record.planner->official_score.size() == 3) {
-        output_ << record.planner->official_score[0] << ','
-                << record.planner->official_score[1] << ','
-                << record.planner->official_score[2];
+    const session::SubmissionRecord& record, const simulator::MatchProgress& progress,
+    const nlohmann::json& planning_record) {
+    planner::OfficialScore official_score;
+    if (planning_record.is_object() && planning_record.contains("score")
+        && planning_record.at("score").is_array()
+        && planning_record.at("score").size() == 3) {
+        official_score = {
+            planning_record.at("score").at(0).get<std::int64_t>(),
+            planning_record.at("score").at(1).get<std::int64_t>(),
+            planning_record.at("score").at(2).get<std::int64_t>()};
+    } else if (record.planner) {
+        official_score = {
+            record.planner->official_score[0], record.planner->official_score[1],
+            record.planner->official_score[2]};
     } else {
-        output_ << "unknown";
+        official_score = {
+            static_cast<std::int64_t>(progress.acquired_brands.size()),
+            std::accumulate(progress.daily_distinct_brand_counts.begin(),
+                            progress.daily_distinct_brand_counts.end(), std::int64_t{0}),
+            progress.total_balls};
     }
-    output_ << " candidateSource="
-            << (record.planner ? record.planner->planner_kind : "baseline")
-            << " adoption=" << (record.planner ? record.planner->selection_reason : "baseline-retained")
-            << " post=" << (record.revision ? "success" : "dry-run") << '\n';
+    const auto candidate_source = planning_record.is_object() ? planning_record.value(
+        "candidateSource", record.planner ? record.planner->planner_kind : "baseline")
+        : record.planner ? record.planner->planner_kind : "baseline";
+    const auto adoption = planning_record.is_object() ? planning_record.value(
+        "adoptionReason", record.planner ? record.planner->selection_reason : "baseline-retained")
+        : record.planner ? record.planner->selection_reason : "baseline-retained";
+    output_ << "daily-end day=" << daily.day
+            << " score=[" << official_score.total_unique_brands << ','
+            << official_score.cumulative_daily_unique_brands << ','
+            << official_score.total_bowls << "]"
+            << " candidateSource=" << candidate_source
+            << " adoption=" << adoption
+            << " post=" << (record.revision ? "success" : "dry-run")
+            << " agents=\"";
+    for (std::size_t index = 0; index < record.simulation.end_agents.size(); ++index) {
+        if (index != 0) output_ << ';';
+        const auto& agent = record.simulation.end_agents[index];
+        output_ << index << ':' << agent_kind_name(agent.kind)
+                << '@' << agent.position.value << " fuel=" << agent.fuel;
+    }
+    output_ << "\"\n";
     static_cast<void>(config);
-    static_cast<void>(remaining);
-    static_cast<void>(progress);
-    static_cast<void>(record);
 }
 
 RunResult AutoCompetitionClient::run() {
@@ -1074,10 +1116,13 @@ RunResult AutoCompetitionClient::run() {
                                     || observation_rejection_reason == "claim-mismatch"
                                     || observation_rejection_reason == "strict-revalidation-failed"
                                     || !observation_rejection_reason.empty()) {
-                                    const auto warning = observation_claim == "timeout" ? "timeout"
-                                        : observation_rejection_reason == "claim-mismatch" ? "claim-mismatch"
-                                        : observation_rejection_reason == "strict-revalidation-failed" ? "strict-failure"
-                                        : "transport-failure";
+                                    const auto warning = observation_rejection_reason == "claim-mismatch"
+                                        ? "claim-mismatch"
+                                        : observation_rejection_reason == "strict-revalidation-failed"
+                                            ? "strict-failure"
+                                            : !observation_rejection_reason.empty()
+                                                ? observation_rejection_reason.c_str()
+                                                : observation_claim == "timeout" ? "timeout" : "worker-failure";
                                     output_ << "warning=lan-worker "
                                             << warning << '\n';
                                 }
@@ -1204,14 +1249,16 @@ RunResult AutoCompetitionClient::run() {
                                 result.record["mainRevalidationTermination"] = main_revalidation_termination;
                                 result.record["mainBestCandidateAtSharedDeadline"] = main_deadline_best;
                                 result.record["mainBestCandidateStrictVerified"] = main_deadline_best;
-                                if (worker_termination_diagnostic != "completed"
-                                    && worker_termination_diagnostic != "iteration_limit"
-                                    && worker_termination_diagnostic != "deadline_exhausted_best_available") {
-                                    result.reason = worker_termination_diagnostic == "deadline_exhausted"
-                                        ? "candidate-unverified-deadline" : "candidate-termination-invalid";
-                                    observation_claim = "mismatch";
-                                    observation_rejection_reason = worker_termination_diagnostic == "deadline_exhausted"
-                                        ? "deadline-exhausted" : "termination-invalid";
+                                const auto termination_class = classify_worker_termination(
+                                    worker_termination_diagnostic);
+                                if (termination_class != "candidate") {
+                                    result.reason = termination_class == "deadline-exhausted"
+                                        ? "candidate-unverified-deadline"
+                                        : termination_class == "fallback" ? "worker-fallback"
+                                        : "candidate-termination-invalid";
+                                    observation_claim = termination_class == "fallback"
+                                        ? "fallback" : "mismatch";
+                                    observation_rejection_reason = termination_class;
                                     continue;
                                 }
                                 compare("requestIdDigest",
@@ -1402,7 +1449,7 @@ RunResult AutoCompetitionClient::run() {
                     const auto saved_submission = competition.save(state_path);
                     if (!saved_submission) return {RunStatus::Failed, saved_submission.error().message};
                 }
-                print_day_summary(setting.value(), daily.value(), sent.value(), competition.progress());
+                print_day_summary(setting.value(), daily.value(), sent.value(), competition.progress(), planned.record);
             } else {
             const auto deadline = competition.deadline(clock_.wall_now(), clock_.now(), config_.safety_margin);
             if (deadline.remaining(clock_.now()).count() <= 0) {
