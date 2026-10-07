@@ -31,6 +31,20 @@ int main() {
         std::chrono::steady_clock::time_point::max());
     if (!insertion_plan || insertion_plan.value().simulation.total_balls != 2) return 1;
     if (insertion_plan.value().visited_spots[0] != std::vector<std::size_t>({0, 1})) return 1;
+    auto stock_map = std::move(core::MapDefinition::create(2, 2,
+        std::vector<core::Terrain>(4, core::Terrain::Plain)).value());
+    core::MatchConfig stock_match{0, {60}, {2}, stock_map,
+        {{7, {1}, 2}}, {{0}, {0}}, 10, 1, 1, 2};
+    core::DailyState stock_daily{100, 0,
+        {{core::AgentKind::Patrol, {0}, 10},
+         {core::AgentKind::Patrol, {0}, 10}}, {}, {}};
+    simulator::MatchProgress stock_progress;
+    const auto stock_plan = planner::make_greedy_plan(
+        {stock_match, stock_daily, stock_progress}, {20, 30013},
+        std::chrono::steady_clock::time_point::max());
+    if (!stock_plan || stock_plan.value().simulation.total_balls != 2) return 1;
+    if (stock_plan.value().visited_spots[0] != std::vector<std::size_t>{0}
+        || stock_plan.value().visited_spots[1] != std::vector<std::size_t>{0}) return 1;
 
     core::MapDefinition map = std::move(core::MapDefinition::create(16, 16,
         std::vector<core::Terrain>(256, core::Terrain::Plain)).value());
