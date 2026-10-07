@@ -335,6 +335,20 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
     if (fallback_reason != nullptr) *fallback_reason = {};
     auto& a = s.patrol_routes[pick(random, s.patrol_routes.size())];
     normalize(a);
+    const auto stock_value_spot = [&](const std::vector<std::size_t>& candidates) {
+        const auto origin = a.spot_indices.empty()
+            ? input.daily.own_agents[a.agent_index].position
+            : input.match.spots[a.spot_indices.back()].position;
+        return *std::max_element(candidates.begin(), candidates.end(), [&](const auto left, const auto right) {
+            const auto left_key = std::tuple{input.match.spots[left].max_stock,
+                -core::hex_distance(input.match.map, origin, input.match.spots[left].position),
+                -static_cast<std::int64_t>(left)};
+            const auto right_key = std::tuple{input.match.spots[right].max_stock,
+                -core::hex_distance(input.match.map, origin, input.match.spots[right].position),
+                -static_cast<std::int64_t>(right)};
+            return left_key < right_key;
+        });
+    };
     const auto meeting_cells = [&](const PatrolRoutePlan& route) {
         std::vector<core::CellIndex> cells{input.daily.own_agents[route.agent_index].position};
         for (const auto spot : route.spot_indices)
@@ -370,7 +384,7 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
         std::vector<std::size_t> unused;
         for (std::size_t i = 0; i < input.match.spots.size(); ++i) if (!used.contains(i)) unused.push_back(i);
         if (unused.empty()) return false;
-        const auto spot = unused[pick(random, unused.size())];
+        const auto spot = stock_value_spot(unused);
         const auto at = pick(random, a.spot_indices.size() + 1);
         a.spot_indices.insert(a.spot_indices.begin() + static_cast<std::ptrdiff_t>(at), spot);
         a.objectives.insert(a.objectives.begin() + static_cast<std::ptrdiff_t>(at), pathfinding::RouteObjective::Fastest);
@@ -401,7 +415,7 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
             candidates = std::move(unused);
             if (fallback_reason != nullptr) *fallback_reason = "no-uncollected-brand";
         }
-        const auto spot = candidates[pick(random, candidates.size())];
+        const auto spot = stock_value_spot(candidates);
         const bool can_insert = !a.spot_indices.empty();
         const auto mutation_choice = random() % 3U;
         const bool replace = can_insert && mutation_choice == 0U;
