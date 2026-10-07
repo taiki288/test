@@ -143,17 +143,10 @@ daily_readiness(const core::MatchConfig &match, const core::DailyState &daily,
                 const simulator::DaySimulationResult &simulation,
                 const std::vector<std::vector<std::size_t>> &visited_spots) {
   DailyReadiness result;
-  std::vector<bool> visited(match.spots.size(), false);
-  for (const auto &visits : visited_spots) {
-    for (const auto spot : visits) {
-      if (spot < visited.size())
-        visited[spot] = true;
-    }
-  }
+  // Every spot is replenished at the start of the next day. Estimate how many
+  // balls can be opened from the end state, including spots visited today.
   for (std::size_t spot = 0; spot < match.spots.size(); ++spot) {
-    if (visited[spot])
-      continue;
-    std::int64_t best = std::numeric_limits<std::int64_t>::max();
+    std::int64_t reachable_patrols = 0;
     for (std::size_t agent = 0; agent < simulation.end_agents.size(); ++agent) {
       if (simulation.end_agents[agent].kind != core::AgentKind::Patrol)
         continue;
@@ -162,10 +155,10 @@ daily_readiness(const core::MatchConfig &match, const core::DailyState &daily,
                         match.spots[spot].position);
       // Two steps per plain edge is a conservative, future-road-free estimate.
       if (distance * 2 <= simulation.end_agents[agent].fuel)
-        best = std::min(best, distance);
+        ++reachable_patrols;
     }
-    if (best != std::numeric_limits<std::int64_t>::max())
-      ++result.uncollected_spot_reachability;
+    result.uncollected_spot_reachability += std::min<std::int64_t>(
+        reachable_patrols, match.spots[spot].max_stock);
   }
   std::vector<std::size_t> patrols;
   std::vector<std::size_t> supplies;
@@ -202,6 +195,7 @@ daily_readiness(const core::MatchConfig &match, const core::DailyState &daily,
     result.deterministic_order.push_back(agent.fuel);
   }
   static_cast<void>(daily);
+  static_cast<void>(visited_spots);
   return result;
 }
 

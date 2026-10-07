@@ -17,6 +17,15 @@ int main() {
     if (core::hex_distance(distance_map, {9}, {1}) != 1) return 1;
     if (core::hex_distance(distance_map, {0}, {16}) != 2) return 1;
     if (core::hex_distance(distance_map, {0}, {27}) != 4) return 1;
+    core::MatchConfig readiness_match{0, {60}, {20}, distance_map,
+        {{1, {0}, 2}}, {{0}, {1}}, 20, 1, 1, 2};
+    core::DailyState readiness_daily{100, 0,
+        {{core::AgentKind::Patrol, {0}, 20},
+         {core::AgentKind::Patrol, {1}, 20}}, {}, {}};
+    const auto readiness_sim = test::simulation(readiness_daily.own_agents);
+    const auto readiness = planner::daily_readiness(
+        readiness_match, readiness_daily, readiness_sim, {{0}, {0}});
+    if (readiness.uncollected_spot_reachability != 2) return 1;
 
     auto insertion_map = std::move(core::MapDefinition::create(8, 8,
         std::vector<core::Terrain>(64, core::Terrain::Plain)).value());
