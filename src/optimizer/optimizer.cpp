@@ -100,17 +100,6 @@ std::vector<std::size_t> supply_indices(const planner::PlannerInput& input) {
     return result;
 }
 
-std::optional<core::CellIndex> random_traversable_cell(
-    const core::MapDefinition& map, std::mt19937_64& random) {
-    std::vector<core::CellIndex> cells;
-    for (std::int32_t value = 0; value < map.cell_count(); ++value) {
-        const core::CellIndex cell{value};
-        if (map.terrain_at(cell) != core::Terrain::Pond) cells.push_back(cell);
-    }
-    if (cells.empty()) return std::nullopt;
-    return cells[pick(random, cells.size())];
-}
-
 void normalize(PatrolRoutePlan& route) {
     route.objectives.resize(route.spot_indices.size(), pathfinding::RouteObjective::Fastest);
 }
@@ -138,7 +127,7 @@ std::optional<BuiltCandidate> build_candidate(
     planner::InternalTieBreak tie;
     std::vector<std::int64_t> elapsed_by_agent(plan.size(), 0);
     std::vector<std::vector<RouteOccurrence>> occurrences(plan.size());
-    std::set<std::size_t> globally_assigned;
+    std::vector<core::Quantity> assigned_counts(input.match.spots.size(), 0);
     for (const auto& route_plan : solution.patrol_routes) {
         if (route_plan.agent_index >= plan.size()
             || input.daily.own_agents[route_plan.agent_index].kind != core::AgentKind::Patrol
@@ -149,7 +138,11 @@ std::optional<BuiltCandidate> build_candidate(
         occurrences[route_plan.agent_index].push_back({position, 0, 0});
         for (std::size_t leg = 0; leg < route_plan.spot_indices.size(); ++leg) {
             const auto spot = route_plan.spot_indices[leg];
-            if (spot >= input.match.spots.size() || !globally_assigned.insert(spot).second) return std::nullopt;
+            if (spot >= input.match.spots.size()
+                || std::find(route_plan.spot_indices.begin(),
+                             route_plan.spot_indices.begin() + static_cast<std::ptrdiff_t>(leg),
+                             spot) != route_plan.spot_indices.begin() + static_cast<std::ptrdiff_t>(leg)
+                || ++assigned_counts[spot] > input.match.spots[spot].max_stock) return std::nullopt;
             auto found = pathfinder.find_route(position, input.match.spots[spot].position,
                                                route_plan.objectives[leg]);
             if (!found) { diagnostic = found.error().message; return std::nullopt; }
@@ -342,6 +335,26 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
     if (fallback_reason != nullptr) *fallback_reason = {};
     auto& a = s.patrol_routes[pick(random, s.patrol_routes.size())];
     normalize(a);
+    const auto stock_value_spot = [&](const std::vector<std::size_t>& candidates) {
+        const auto origin = a.spot_indices.empty()
+            ? input.daily.own_agents[a.agent_index].position
+            : input.match.spots[a.spot_indices.back()].position;
+        return *std::max_element(candidates.begin(), candidates.end(), [&](const auto left, const auto right) {
+            const auto left_key = std::tuple{input.match.spots[left].max_stock,
+                -core::hex_distance(input.match.map, origin, input.match.spots[left].position),
+                -static_cast<std::int64_t>(left)};
+            const auto right_key = std::tuple{input.match.spots[right].max_stock,
+                -core::hex_distance(input.match.map, origin, input.match.spots[right].position),
+                -static_cast<std::int64_t>(right)};
+            return left_key < right_key;
+        });
+    };
+    const auto meeting_cells = [&](const PatrolRoutePlan& route) {
+        std::vector<core::CellIndex> cells{input.daily.own_agents[route.agent_index].position};
+        for (const auto spot : route.spot_indices)
+            if (spot < input.match.spots.size()) cells.push_back(input.match.spots[spot].position);
+        return cells;
+    };
     switch (n) {
     case Neighborhood::SwapWithin: {
         if (a.spot_indices.size() < 2) return false;
@@ -371,7 +384,7 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
         std::vector<std::size_t> unused;
         for (std::size_t i = 0; i < input.match.spots.size(); ++i) if (!used.contains(i)) unused.push_back(i);
         if (unused.empty()) return false;
-        const auto spot = unused[pick(random, unused.size())];
+        const auto spot = stock_value_spot(unused);
         const auto at = pick(random, a.spot_indices.size() + 1);
         a.spot_indices.insert(a.spot_indices.begin() + static_cast<std::ptrdiff_t>(at), spot);
         a.objectives.insert(a.objectives.begin() + static_cast<std::ptrdiff_t>(at), pathfinding::RouteObjective::Fastest);
@@ -402,7 +415,7 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
             candidates = std::move(unused);
             if (fallback_reason != nullptr) *fallback_reason = "no-uncollected-brand";
         }
-        const auto spot = candidates[pick(random, candidates.size())];
+        const auto spot = stock_value_spot(candidates);
         const bool can_insert = !a.spot_indices.empty();
         const auto mutation_choice = random() % 3U;
         const bool replace = can_insert && mutation_choice == 0U;
@@ -513,11 +526,14 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
     }
     case Neighborhood::MoveRendezvousCell: {
         if (s.rendezvous.empty()) return false;
-        const auto cell = random_traversable_cell(input.match.map, random);
-        if (!cell) return false;
         auto& task = s.rendezvous[pick(random, s.rendezvous.size())];
-        if (task.cell == *cell) return false;
-        task.cell = *cell;
+        const auto route = std::find_if(s.patrol_routes.begin(), s.patrol_routes.end(),
+            [&task](const auto& item) { return item.agent_index == task.patrol_agent; });
+        if (route == s.patrol_routes.end()) return false;
+        auto cells = meeting_cells(*route);
+        cells.erase(std::remove(cells.begin(), cells.end(), task.cell), cells.end());
+        if (cells.empty()) return false;
+        task.cell = cells[pick(random, cells.size())];
         return true;
     }
     case Neighborhood::AdjustRendezvousWait: {
@@ -543,10 +559,10 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
         s.rendezvous.erase(s.rendezvous.begin() + static_cast<std::ptrdiff_t>(pick(random, s.rendezvous.size()))); return true;
     case Neighborhood::AddRendezvous: {
         const auto supplies = supply_indices(input);
-        const auto cell = random_traversable_cell(input.match.map, random);
-        if (supplies.empty() || !cell) return false;
+        const auto cells = meeting_cells(a);
+        if (supplies.empty() || cells.empty()) return false;
         s.rendezvous.push_back(
-            {a.agent_index, supplies[pick(random, supplies.size())], *cell, 0});
+            {a.agent_index, supplies[pick(random, supplies.size())], cells[pick(random, cells.size())], 0});
         return true;
     }
     case Neighborhood::Count: return false;
