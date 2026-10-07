@@ -10,3 +10,6 @@ CMakeCache.txt
 Testing/
 __pycache__/
 *.pyc
+.DS_Store
+.cache/
+run/
