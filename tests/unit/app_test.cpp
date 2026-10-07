@@ -17,6 +17,13 @@ int main() {
     if (core::hex_distance(distance_map, {9}, {1}) != 1) return 1;
     if (core::hex_distance(distance_map, {0}, {16}) != 2) return 1;
     if (core::hex_distance(distance_map, {0}, {27}) != 4) return 1;
+    const optimizer::ScoreBounds phase_bounds{10, 30, 100};
+    if (optimizer::optimization_phase({9, 30, 100}, phase_bounds)
+        != optimizer::OptimizationPhase::TotalUniqueBrands) return 1;
+    if (optimizer::optimization_phase({10, 29, 100}, phase_bounds)
+        != optimizer::OptimizationPhase::DailyUniqueBrands) return 1;
+    if (optimizer::optimization_phase({10, 30, 99}, phase_bounds)
+        != optimizer::OptimizationPhase::TotalBowls) return 1;
     core::MatchConfig compound_match{0, {60}, {20}, distance_map,
         {{1, {1}, 1}, {2, {2}, 1}, {3, {3}, 1}}, {{0}}, 20, 1, 1, 2};
     core::DailyState compound_daily{100, 0,
