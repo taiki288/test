@@ -17,14 +17,25 @@
 主PC単独が標準です。改善候補を別PCで計算する場合だけ、private LANの明示listen addressでworkerを起動し、専用secretを公式tokenとは別の環境変数から渡します。workerは公式APIへ接続せず、主PCから現在日のcanonical PlannerInputだけを受けます。
 
 ```bash
-export HEXA_LAN_WORKER_SECRET='公式tokenとは別の値'
-./hexa_udon worker --listen 192.168.1.20:40123 --worker-token-env HEXA_LAN_WORKER_SECRET
-./hexa_udon auto --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
+# worker 0: --worker-index 0 --worker-count 2 --listen 127.0.0.1:39001
+# worker 1: --worker-index 1 --worker-count 2 --listen 127.0.0.1:39002
+./build-release/hexa_udon worker --listen 127.0.0.1:39001 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET --worker-index 0 --worker-count 2 \
+  --run-id "$RUN_ID" --worker-log "$WORKER_LOG/worker-39001.jsonl"
+./build-release/hexa_udon worker --listen 127.0.0.1:39002 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET --worker-index 1 --worker-count 2 \
+  --run-id "$RUN_ID" --worker-log "$WORKER_LOG/worker-39002.jsonl"
+./build-release/hexa_udon worker-preflight --listen 127.0.0.1:39001 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET --worker-index 0 --worker-count 2
+./build-release/hexa_udon worker-preflight --listen 127.0.0.1:39002 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET --worker-index 1 --worker-count 2
+./build-release/hexa_udon auto --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN \
   --profile-set v2 --planner daily-improvement \
-  --lan-worker 192.168.1.20:40123 --lan-worker-timeout-ms 250
+  --lan-worker 127.0.0.1:39001 --lan-worker 127.0.0.1:39002 \
+  --lan-worker-timeout-ms 30000 --session-dir "$PRACTICE_SESSION" --log-dir "$PRACTICE_LOG"
 ```
 
-主PCはbaselineを先にstrict検証し、worker応答も独立検証します。timeout、切断、identity不一致、reserve不足ではworkerを待たず`baseline-retained`へ戻ります。worker未指定時の既存動作は変わりません。loopbackで確認済みですが、実LAN・実APIは第49段階で確認予定です。wire境界は[LAN運用](lan-worker.md)に記載しています。
+主PCはbaselineを先にstrict検証し、worker応答も独立検証します。timeout、切断、identity不一致、reserve不足ではworkerを待たず`baseline-retained`へ戻ります。worker未指定時の既存動作は変わりません。worker capは16×16=5000ms、24×24=10000ms、32×32=15000msです。`fallback`、`readiness-lost`、`deadline-exhausted`、`strict-failure`はtransport failureではありません。実LAN・実API・実token・競技POSTは未検証です。wire境界は[LAN運用](lan-worker.md)に記載しています。
 
 ## 初日と日次の情報境界
 

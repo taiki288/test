@@ -72,7 +72,116 @@ workerはloopbackまたはprivate LANのaddressで起動します。公式token�
   --log-dir /secure/runtime/log
 ```
 
-### 2.7 executeを明示して本番実行する
+### 2.7 worker 2台構成
+
+worker 2台を使う場合は、3ターミナルを開きます。3ターミナルすべてで、同じworker専用secretを`HEXA_LAN_WORKER_SECRET`へ設定してください。worker 0/1と主PCは同じ`build-release/hexa_udon`を使い、workerが`worker=ready`を表示してから主PCを起動します。
+
+worker 0/1の`RUN_ID`は主PCで作成した値と同じ値を各タブへ設定してください。タブごとに別の時刻から生成しないでください。
+
+#### タブ1: worker 0
+
+```bash
+cd ~/30013-port
+export HEXA_LAN_WORKER_SECRET='(worker専用secret)'
+export RUN_ID='practice-YYYYMMDD-HHMMSS'  # 主PCで使う値と同じに置換
+
+mkdir -p "$HOME/hexa-runtime/worker-log"
+
+stdbuf -oL -eL ./build-release/hexa_udon worker \
+  --listen 127.0.0.1:39001 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET \
+  --worker-index 0 --worker-count 2 \
+  --run-id "$RUN_ID" \
+  --worker-log "$HOME/hexa-runtime/worker-log/$RUN_ID-worker-39001.jsonl"
+```
+
+#### タブ2: worker 1
+
+```bash
+cd ~/30013-port
+export HEXA_LAN_WORKER_SECRET='(worker専用secret)'
+export RUN_ID='practice-YYYYMMDD-HHMMSS'  # タブ1と同じ値
+
+mkdir -p "$HOME/hexa-runtime/worker-log"
+
+stdbuf -oL -eL ./build-release/hexa_udon worker \
+  --listen 127.0.0.1:39002 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET \
+  --worker-index 1 --worker-count 2 \
+  --run-id "$RUN_ID" \
+  --worker-log "$HOME/hexa-runtime/worker-log/$RUN_ID-worker-39002.jsonl"
+```
+
+#### タブ3: 主PC
+
+環境変数には実値を書かず、実行時に置き換えます。毎回、新しい`RUN_ID`とSession/log directoryを使用してください。
+
+```bash
+cd ~/30013-port
+
+export VENUE_BASE_URL='https://<practice-venue-host>'
+export PROCON_TOKEN='<practice-token>'
+export HEXA_LAN_WORKER_SECRET='(worker専用secret)'
+
+RUN_ID="practice-$(date +%Y%m%d-%H%M%S)"
+export PRACTICE_SESSION="$HOME/hexa-runtime/$RUN_ID/session"
+export PRACTICE_LOG="$HOME/hexa-runtime/$RUN_ID/log"
+
+mkdir -p "$PRACTICE_SESSION" "$PRACTICE_LOG"
+
+ss -ltnp | grep -E ':39001|:39002'
+```
+
+両portが`LISTEN`になり、両workerが`worker=ready`になっていることを確認してから、次のpreflightを実行します。preflightはsecretの値を表示せず、protocol schema、build fingerprint、logical worker index/count、evaluator/profile identity、secret設定済みだけを確認します。
+
+```bash
+./build-release/hexa_udon worker-preflight --listen 127.0.0.1:39001 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET --worker-index 0 --worker-count 2
+./build-release/hexa_udon worker-preflight --listen 127.0.0.1:39002 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET --worker-index 1 --worker-count 2
+```
+
+preflight成功後に実行します。`--lan-worker`はrepeatableなので、2台分を指定します。
+
+```bash
+./build-release/hexa_udon auto \
+  --base-url "$VENUE_BASE_URL" \
+  --token-env PROCON_TOKEN \
+  --profile-set v2 \
+  --planner daily-improvement \
+  --execute \
+  --lan-worker 127.0.0.1:39001 \
+  --lan-worker 127.0.0.1:39002 \
+  --lan-worker-timeout-ms 30000 \
+  --session-dir "$PRACTICE_SESSION" \
+  --log-dir "$PRACTICE_LOG"
+```
+
+注意事項:
+
+- 16x16はprofile capによりeffective timeoutが5000ms、24x24は10000ms、32x32は15000msです。`--lan-worker-timeout-ms 30000`を指定しても、サイズ上限を超えて動作しません。CLIで60000msは指定できません。
+- timeoutしたworkerは不採用になり、mainまたはbaselineへfallbackします。他workerと主PCの処理は継続します。
+- `fallback`、`readiness-lost`、`deadline-exhausted`はtransport failureではありません。transport failureはconnect/write/read/EOF/auth/protocol/frame系の通信失敗です。
+- `daily-end`にはscore、candidateSource、adoption、agent位置、fuelが表示されます。詳細診断はSession、OperationLog、worker logへ保存されます。
+- token、secret、HTTP本文、action全配列はログへ保存しません。
+- Session/log/worker logはGit外で管理し、directoryは0700、ファイルは0600で作成します。worker logにはRUN_ID、phase、failure classification、elapsedMsを保存します。
+- `deadline-exhausted`はplanner/shared deadline到達、`read-timeout`はsocket read timeoutです。`fallback`、`readiness-lost`、`strict-failure`はtransport failureではありません。
+- `RecoveryRequired`時は同じSessionでautoを再実行しません。`show-state`で状態を確認し、必要に応じて`recover`をdry-runで使います。
+- 実LANではloopbackのIP/portを実環境の値に置き換えます。実LAN、実API、実tokenの相互運用は別途未検証です。
+
+#### 終了後の確認
+
+```bash
+./build-release/hexa_udon show-state \
+  --session-dir "$PRACTICE_SESSION"
+
+grep -RInE \
+  'daily-end|score=|agents=|worker|fallback|readiness-lost|deadline-exhausted|transport-failure|RecoveryRequired' \
+  "$PRACTICE_LOG" \
+  "$HOME/hexa-runtime/worker-log"
+```
+
+### 2.8 executeを明示して本番実行する
 
 dry-runの結果、profile、types、Session、log、時刻を人手で確認してから`--execute`を付けます。
 
@@ -85,7 +194,7 @@ dry-runの結果、profile、types、Session、log、時刻を人手で確認し
   --log-dir /secure/runtime/log
 ```
 
-### 2.8 終了後に状態を確認する
+### 2.9 終了後に状態を確認する
 
 ```bash
 ./build-release/hexa_udon show-state \
@@ -101,14 +210,14 @@ dry-runの結果、profile、types、Session、log、時刻を人手で確認し
   --log-dir /secure/runtime/log
 ```
 
-### 2.9 異常時の停止点
+### 2.10 異常時の停止点
 
 - workerのtimeout、transport failure、claim mismatch、strict failureは、そのworkerだけを失敗扱いにします。他workerとmainの処理は継続し、採用不能ならbaselineへfallbackします。
 - 403/429は安全な分類、`Retry-After`、bounded backoff、deadlineをOperationLogで確認します。deadlineを越える再試行や新規GET/POSTは開始しません。
 - POST前のtimeoutは`submissionAttempted=false`です。POST後に応答が不明なら`null`となり、`RecoveryRequired`で停止します。公式状態を確認するまで再送しません。
 - `RecoveryRequired`、claim mismatch、strict failure、deadline不足は本番の停止・人手確認が必要な警告です。
 
-### 2.10 Session/logを確認する
+### 2.11 Session/logを確認する
 
 終了後は`show-state`と保護されたSession/log directoryを確認し、最終score、candidateSource、adoption結果、POST結果、RecoveryRequiredの有無を記録します。Session/logを提出物やGitへコピーしません。
 

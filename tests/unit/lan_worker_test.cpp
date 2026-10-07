@@ -1,9 +1,12 @@
 #include "hexa_udon/protocol/request_id_digest.hpp"
 #include "hexa_udon/app/lan_worker.hpp"
 #include "hexa_udon/app/auto_client.hpp"
+#include "hexa_udon/protocol/file_security.hpp"
 
 #include <cassert>
 #include <cstdlib>
+#include <fstream>
+#include <filesystem>
 #include <nlohmann/json.hpp>
 
 namespace {
@@ -43,6 +46,8 @@ int main() {
         == "write-timeout");
     require(hexa_udon::app::classify_worker_failure("worker read timeout", true)
         == "read-timeout");
+    require(hexa_udon::app::classify_worker_failure("worker deadline reached", true)
+        == "deadline-exhausted");
     require(hexa_udon::app::classify_worker_failure("worker reply eof", false)
         == "reply-eof");
     require(hexa_udon::app::classify_worker_failure("authentication-or-protocol-mismatch", false)
@@ -55,6 +60,9 @@ int main() {
     require(hexa_udon::app::classify_worker_termination("deadline_exhausted") == "deadline-exhausted");
     require(hexa_udon::app::classify_worker_termination("fallback") == "fallback");
     require(hexa_udon::app::classify_worker_termination("unexpected") == "termination-invalid");
+    require(!hexa_udon::app::worker_build_fingerprint().empty());
+    require(!hexa_udon::app::worker_evaluator_identity().empty());
+    require(hexa_udon::app::worker_protocol_schema_version() > 0);
 
     using hexa_udon::protocol::request_id_digest_or_missing;
     const auto make_reply = [](int index, const char* termination,
@@ -111,6 +119,25 @@ int main() {
     require(strict_failure.at("comparison") == "not-evaluated");
     require(strict_failure.at("adoption") == "baseline-retained");
     require(request_id_digest_or_missing(nlohmann::json::object()) == "missing");
+    require(hexa_udon::app::request_lan_worker_preflight(
+        {"127.0.0.1", 1}, "", 0, 2, std::chrono::milliseconds{1}).failure_classification
+        == "auth-protocol-mismatch");
+
+    const auto permission_root = std::filesystem::temp_directory_path() / "hexa-udon-permission-fixture";
+    std::filesystem::remove_all(permission_root);
+    require(std::filesystem::create_directories(permission_root));
+    require(hexa_udon::protocol::secure_directory(permission_root));
+    const auto state_file = permission_root / "state.json";
+    { std::ofstream output(state_file); output << "{}\n"; }
+    require(hexa_udon::protocol::secure_file(state_file));
+    const auto directory_permissions = std::filesystem::status(permission_root).permissions();
+    const auto file_permissions = std::filesystem::status(state_file).permissions();
+    require((directory_permissions & std::filesystem::perms::all)
+        == (std::filesystem::perms::owner_read | std::filesystem::perms::owner_write
+            | std::filesystem::perms::owner_exec));
+    require((file_permissions & std::filesystem::perms::all)
+        == (std::filesystem::perms::owner_read | std::filesystem::perms::owner_write));
+    std::filesystem::remove_all(permission_root);
 
     // Old replies without the new diagnostic fields remain decodable.
     const nlohmann::json old_reply = {{"termination", "completed"},

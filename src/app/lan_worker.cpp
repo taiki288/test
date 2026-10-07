@@ -2,6 +2,7 @@
 #include "hexa_udon/optimizer/daily_deadline_policy.hpp"
 #include "hexa_udon/protocol/json_codec.hpp"
 #include "hexa_udon/protocol/request_id_digest.hpp"
+#include "hexa_udon/protocol/file_security.hpp"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -16,9 +17,11 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <set>
+#include <string_view>
 
 namespace hexa_udon::app {
 namespace {
@@ -26,6 +29,11 @@ namespace {
 constexpr int protocol_version = 1;
 constexpr auto request_frame_timeout = std::chrono::seconds{1};
 constexpr auto default_reply_grace = std::chrono::milliseconds{100};
+
+#ifndef HEXA_UDON_BUILD_FINGERPRINT
+#define HEXA_UDON_BUILD_FINGERPRINT "unknown"
+#endif
+constexpr std::string_view evaluator_identity = "daily-improvement-candidate-v1";
 
 std::string hex_digest(std::string_view value) {
     // This is an identity/MAC token for the local protocol, not a password
@@ -111,6 +119,44 @@ nlohmann::json response_failure(const std::string& reason,
              {"futureSnapshotRead", false}, {"lookahead", 0},
              {"networkRequests", 0}, {"postCount", 0} };
 }
+
+class WorkerDiagnosticLog {
+public:
+    explicit WorkerDiagnosticLog(const LanWorkerConfig& config) :
+        run_id_(config.run_id.empty() ? "unspecified" : config.run_id),
+        worker_index_(config.worker_index), worker_count_(config.worker_count) {
+        if (config.diagnostic_log.empty()) return;
+        std::error_code error;
+        const auto parent = config.diagnostic_log.parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent, error);
+        if (error || (!parent.empty() && !protocol::secure_directory(parent))) return;
+        file_.open(config.diagnostic_log, std::ios::app);
+        if (file_) static_cast<void>(protocol::secure_file(config.diagnostic_log));
+    }
+
+    [[nodiscard]] bool available() const noexcept { return file_.is_open() && file_.good(); }
+
+    void phase(const std::string& name, const std::string& status,
+               const std::string& classification, std::int64_t elapsed_ms) noexcept {
+        if (!file_) return;
+        try {
+            const nlohmann::json row = {
+                {"runId", run_id_}, {"workerIndex", worker_index_},
+                {"workerCount", worker_count_}, {"phase", name}, {"status", status},
+                {"failureClassification", classification}, {"elapsedMs", elapsed_ms}};
+            file_ << row.dump() << '\n';
+            file_.flush();
+        } catch (...) {
+            // Diagnostics must never change planner or fallback behavior.
+        }
+    }
+
+private:
+    std::ofstream file_;
+    std::string run_id_;
+    std::size_t worker_index_;
+    std::size_t worker_count_;
+};
 
 struct DecodedInput {
     core::MatchConfig match;
@@ -228,11 +274,16 @@ std::string classify_worker_failure(const std::string& error, const bool deadlin
     if (error.find("reply eof") != std::string::npos) return "reply-eof";
     if (error.find("authentication") != std::string::npos
         || error.find("protocol mismatch") != std::string::npos
-        || error.find("identity-mismatch") != std::string::npos) return "auth-protocol-mismatch";
+        || error.find("identity-mismatch") != std::string::npos
+        || error.find("identity mismatch") != std::string::npos
+        || error.find("future-snapshot") != std::string::npos) return "auth-protocol-mismatch";
     if (error.find("malformed") != std::string::npos
         || error.find("oversized") != std::string::npos
         || error.find("decode") != std::string::npos) return "frame-decode-failure";
-    if (deadline_reached) return "read-timeout";
+    if (error.find("planner") != std::string::npos
+        || error.find("optimizer") != std::string::npos
+        || error.find("action-encoding") != std::string::npos) return "planner-failure";
+    if (deadline_reached) return "deadline-exhausted";
     return "transport-failure";
 }
 
@@ -271,6 +322,10 @@ std::string map_identity_digest(const core::MapDefinition& map) {
     for (const auto terrain : map.cells()) canonical << core::to_int(terrain) << ',';
     return hex_digest(canonical.str());
 }
+
+std::string worker_build_fingerprint() { return HEXA_UDON_BUILD_FINGERPRINT; }
+std::string worker_evaluator_identity() { return std::string{evaluator_identity}; }
+int worker_protocol_schema_version() noexcept { return protocol_version; }
 
 LanWorkerReply request_lan_worker(const LanWorkerEndpoint& endpoint,
                                   const std::string& secret,
@@ -333,6 +388,27 @@ LanWorkerReply request_lan_worker(const LanWorkerEndpoint& endpoint,
     } catch (...) { return {false, {}, "worker reply malformed", "frame-decode-failure"}; }
 }
 
+LanWorkerReply request_lan_worker_preflight(const LanWorkerEndpoint& endpoint,
+                                            const std::string& secret,
+                                            const std::size_t expected_worker_index,
+                                            const std::size_t expected_worker_count,
+                                            const std::chrono::milliseconds timeout) {
+    const nlohmann::json request = {
+        {"preflight", true}, {"requestId", "worker-preflight"},
+        {"workerIndex", expected_worker_index}, {"workerCount", expected_worker_count}};
+    auto reply = request_lan_worker(endpoint, secret, request, timeout);
+    if (!reply.success) return reply;
+    if (!reply.payload.value("preflight", false)
+        || reply.payload.value("workerProtocolSchemaVersion", 0) != protocol_version
+        || reply.payload.value("logicalWorkerIndex", expected_worker_index + 1) != expected_worker_index
+        || reply.payload.value("logicalWorkerCount", 0U) != expected_worker_count
+        || reply.payload.value("workerBuildFingerprint", "").empty()
+        || reply.payload.value("workerEvaluatorIdentity", "").empty()) {
+        return {false, reply.payload, "worker preflight identity mismatch", "auth-protocol-mismatch"};
+    }
+    return reply;
+}
+
 int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& stop_requested,
                    std::ostream& output) {
     if (!is_allowed_worker_address(config.listen.host) || config.listen.port == 0) {
@@ -340,6 +416,11 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
     }
     const char* secret = std::getenv(config.secret_environment.c_str());
     if (secret == nullptr || *secret == '\0') { output << "worker-error=secret-missing\n"; return 2; }
+    WorkerDiagnosticLog diagnostics(config);
+    if (!config.diagnostic_log.empty() && !diagnostics.available()) {
+        output << "worker-error=diagnostic-log\n";
+        return 1;
+    }
     const int server = ::socket(AF_INET, SOCK_STREAM, 0);
     if (server < 0) { output << "worker-error=socket\n"; return 1; }
     int reuse = 1; ::setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
@@ -355,6 +436,8 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
         if (!wait_fd(server, false, std::chrono::milliseconds{100})) continue;
         const int client = ::accept(server, nullptr, nullptr);
         if (client < 0) continue;
+        const auto request_started = std::chrono::steady_clock::now();
+        diagnostics.phase("request-received", "started", "", 0);
         const auto request_deadline = std::chrono::steady_clock::now() + request_frame_timeout;
         auto reply_deadline = request_deadline;
         const auto flags = ::fcntl(client, F_GETFL, 0);
@@ -362,28 +445,54 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
         const auto line = read_line(client, config.maximum_frame_bytes, request_deadline);
         nlohmann::json reply;
         nlohmann::json request = nlohmann::json::object();
-        if (line.status != FrameReadStatus::Success) reply = response_failure(
-            line.status == FrameReadStatus::Timeout ? "request-read-timeout" : "malformed-or-oversized-request");
+        if (line.status != FrameReadStatus::Success) {
+            const auto classification = line.status == FrameReadStatus::Timeout
+                ? "read-timeout" : "frame-decode-failure";
+            diagnostics.phase("auth-protocol", "rejected", classification, 0);
+            reply = response_failure(
+                line.status == FrameReadStatus::Timeout ? "request-read-timeout" : "malformed-or-oversized-request");
+        }
         else try {
             request = nlohmann::json::parse(line.line);
             static const std::set<std::string> allowed_request{
                 "protocolVersion", "requestId", "auth", "evaluatorVersion", "day", "size",
                 "agentCount", "typeIdentity", "snapshotIdentity", "mapIdentity", "stateIdentity",
                 "policyIdentity", "workerBudgetMs", "futureSnapshotRead", "lookahead", "startAgents",
-                "traffic", "plannerInput", "payloadHash", "workerIndex", "workerCount"};
+                "traffic", "plannerInput", "payloadHash", "workerIndex", "workerCount", "preflight"};
             bool unknown = false;
             for (const auto& item : request.items()) unknown = unknown || !allowed_request.contains(item.key());
             const auto supplied = request.value("auth", "");
             if (request.value("protocolVersion", 0) != protocol_version
                 || supplied != worker_auth_digest(secret, request) || unknown) {
+                diagnostics.phase("auth-protocol", "rejected", "auth-protocol-mismatch", 0);
                 reply = response_failure("authentication-or-protocol-mismatch");
             } else if (request.value("futureSnapshotRead", false)
                        || request.value("lookahead", 0) != 0) {
+                diagnostics.phase("auth-protocol", "accepted", "", 0);
                 reply = response_failure("future-snapshot-forbidden");
+            } else if (request.value("preflight", false)) {
+                diagnostics.phase("auth-protocol", "accepted", "", 0);
+                const auto requested_index = request.value("workerIndex", config.worker_index);
+                const auto requested_count = request.value("workerCount", config.worker_count);
+                const bool identity_ok = requested_index == config.worker_index
+                    && requested_count == config.worker_count;
+                reply = { {"protocolVersion", protocol_version}, {"success", identity_ok},
+                          {"preflight", true}, {"failureReason", identity_ok ? "" : "worker identity mismatch"},
+                          {"workerBuildFingerprint", worker_build_fingerprint()},
+                          {"workerProtocolSchemaVersion", worker_protocol_schema_version()},
+                          {"workerEvaluatorIdentity", config.evaluator_identity.empty()
+                              ? worker_evaluator_identity() : config.evaluator_identity},
+                          {"workerProfileIdentity", config.profile_identity},
+                          {"logicalWorkerIndex", config.worker_index},
+                          {"logicalWorkerCount", config.worker_count},
+                          {"futureSnapshotRead", false}, {"lookahead", 0},
+                          {"networkRequests", 0}, {"postCount", 0} };
             } else {
+                diagnostics.phase("auth-protocol", "accepted", "", 0);
                 std::string decode_error;
                 const auto decoded = decode_input(request, decode_error);
                 if (!decoded) {
+                    diagnostics.phase("planner", "failed", "frame-decode-failure", 0);
                     reply = response_failure(decode_error);
                 } else {
                     const auto planning_started = std::chrono::steady_clock::now();
@@ -392,6 +501,7 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                     const auto deadline = planning_started + planning_budget;
                     reply_deadline = worker_reply_deadline(planning_started, planning_budget,
                                                            default_reply_grace);
+                    diagnostics.phase("planner", "started", "", 0);
                     if (request.value("day", -1) != decoded->daily.day
                         || request.value("size", 0) != decoded->match.map.height()
                         || request.value("agentCount", 0) != static_cast<int>(decoded->daily.own_agents.size())
@@ -399,6 +509,7 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                         || request.value("futureSnapshotRead", true)
                         || request.value("lookahead", 1) != 0) {
                         reply = response_failure("planner-input-identity-mismatch");
+                        diagnostics.phase("planner", "failed", "claim-mismatch", 0);
                         reply["requestIdDigest"] = protocol::request_id_digest_or_missing(
                             request.value("requestId", nlohmann::json(nullptr)));
                         const auto encoded = reply.dump() + "\n";
@@ -410,12 +521,14 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                     planner::PlannerConfig planner_config{2000, decoded->seed};
                     auto baseline = planner::make_greedy_plan(planner_input, planner_config, deadline);
                     if (!baseline) {
+                        diagnostics.phase("planner", "failed", "planner-failure", 0);
                         reply = response_failure("baseline-planner-failure", "planner_failure");
                     } else {
                         planner::RefuelPlannerConfig refuel_config{};
                         refuel_config.seed = decoded->seed;
                         auto refuel = planner::make_refuel_plan(planner_input, baseline.value(), refuel_config, deadline);
                         if (!refuel) {
+                            diagnostics.phase("planner", "failed", "planner-failure", 0);
                             reply = response_failure("refuel-planner-failure", "planner_failure");
                         } else {
                             optimizer::OptimizerConfig optimizer_config{};
@@ -424,10 +537,12 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                             auto optimized = optimizer::optimize(planner_input, baseline.value(), refuel.value(),
                                                                  optimizer_config, deadline);
                             if (!optimized) {
+                                diagnostics.phase("planner", "failed", "planner-failure", 0);
                                 reply = response_failure("optimizer-failure", "planner_failure");
                             } else {
                                 const auto encoded = protocol::encode_actions(optimized.value().plan);
                                 if (!encoded) {
+                                    diagnostics.phase("planner", "failed", "planner-failure", 0);
                                     reply = response_failure("action-encoding-failure", "planner_failure");
                                 } else {
                                     const auto actions = nlohmann::json::parse(encoded.value());
@@ -472,6 +587,12 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                                              {"plannerSeed", decoded->seed},
                                              {"workerIndex", request.value("workerIndex", -1)},
                                              {"workerCount", request.value("workerCount", 0)},
+                                             {"workerBuildFingerprint", worker_build_fingerprint()},
+                                             {"workerProtocolSchemaVersion", worker_protocol_schema_version()},
+                                             {"workerEvaluatorIdentity", worker_evaluator_identity()},
+                                             {"workerProfileIdentity", value_hash(request.value("policyIdentity", nlohmann::json(nullptr)))},
+                                             {"logicalWorkerIndex", config.worker_index},
+                                             {"logicalWorkerCount", config.worker_count},
                                              {"payloadHash", value_hash(request.at("plannerInput"))},
                                              {"inputHash", value_hash(request.at("plannerInput"))},
                                              {"startStateHash", value_hash(start_state)},
@@ -502,6 +623,7 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                                              {"failureReason", ""},
                                              {"futureSnapshotRead", false}, {"lookahead", 0},
                                              {"networkRequests", 0}, {"postCount", 0}};
+                                    diagnostics.phase("planner", "completed", termination == "fallback" ? "fallback" : "", 0);
                                 }
                             }
                         }
@@ -515,8 +637,18 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
             reply["requestIdDigest"] = "missing";
         }
         const auto encoded = reply.dump() + "\n";
-        if (std::chrono::steady_clock::now() < reply_deadline)
-            static_cast<void>(write_all(client, encoded, reply_deadline));
+        const auto reply_classification = reply.value("success", false) ? std::string{}
+            : classify_worker_failure(reply.value("failureReason", ""), false);
+        diagnostics.phase("reply-generated", "completed", reply_classification,
+                          std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - request_started).count());
+        diagnostics.phase("reply-send", "started", "", 0);
+        const bool sent = std::chrono::steady_clock::now() < reply_deadline
+            && write_all(client, encoded, reply_deadline);
+        diagnostics.phase("reply-send", sent ? "completed" : "failed",
+                          sent ? "" : "deadline-exhausted",
+                          std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - request_started).count());
         ::close(client);
     }
     ::close(server);

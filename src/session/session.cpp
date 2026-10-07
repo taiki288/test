@@ -1,6 +1,7 @@
 #include "hexa_udon/session/session.hpp"
 
 #include "hexa_udon/protocol/json_codec.hpp"
+#include "hexa_udon/protocol/file_security.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -635,6 +636,10 @@ protocol::Result<bool> SessionController::save(const std::filesystem::path& path
             {protocol::ErrorCode::Persistence, "cannot write temporary state file"});
     }
     output.close();
+    if (!protocol::secure_file(temporary)) {
+        return protocol::Result<bool>::failure(
+            {protocol::ErrorCode::Persistence, "cannot secure temporary state file"});
+    }
     auto synced_file = persistence_->sync_file(temporary);
     if (!synced_file) {
         return synced_file;
@@ -642,6 +647,10 @@ protocol::Result<bool> SessionController::save(const std::filesystem::path& path
     auto replaced = persistence_->replace(temporary, path);
     if (!replaced) {
         return replaced;
+    }
+    if (!protocol::secure_file(path)) {
+        return protocol::Result<bool>::failure(
+            {protocol::ErrorCode::Persistence, "cannot secure state file"});
     }
     auto parent = path.parent_path();
     if (parent.empty()) {

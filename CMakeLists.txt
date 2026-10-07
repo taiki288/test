@@ -1,5 +1,23 @@
 cmake_minimum_required(VERSION 3.20)
 project(hexa_udon_production VERSION 0.1.0 LANGUAGES CXX)
+option(HEXA_UDON_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(HEXA_UDON_ENABLE_SANITIZERS)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=address,undefined)
+    else()
+        message(FATAL_ERROR "HEXA_UDON_ENABLE_SANITIZERS requires GCC or Clang")
+    endif()
+endif()
+execute_process(
+    COMMAND git rev-parse --short=12 HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE HEXA_UDON_BUILD_FINGERPRINT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT HEXA_UDON_BUILD_FINGERPRINT)
+    set(HEXA_UDON_BUILD_FINGERPRINT "unknown")
+endif()
 find_package(nlohmann_json 3.11.3 CONFIG REQUIRED)
 find_package(CURL REQUIRED)
 set(CMAKE_CXX_STANDARD 20)
@@ -54,6 +72,7 @@ hexa_udon_enable_warnings(hexa_udon_session)
 add_library(hexa_udon_app src/app/auto_client.cpp src/app/session_lock.cpp src/app/production_profile.cpp src/app/lan_worker.cpp)
 target_include_directories(hexa_udon_app PUBLIC include)
 target_link_libraries(hexa_udon_app PUBLIC hexa_udon_session hexa_udon_planner hexa_udon_refuel_planner hexa_udon_optimizer hexa_udon_prematch_selector)
+target_compile_definitions(hexa_udon_app PUBLIC HEXA_UDON_BUILD_FINGERPRINT="${HEXA_UDON_BUILD_FINGERPRINT}")
 hexa_udon_enable_warnings(hexa_udon_app)
 add_executable(hexa_udon src/app/main.cpp)
 target_link_libraries(hexa_udon PRIVATE hexa_udon_app)
