@@ -147,8 +147,9 @@ RefuelPlannerOutcome make_refuel_plan(
     Candidate best{prefixes, greedy.plan, std::move(traced).value(), greedy.score,
                    greedy.visited_spots, {}, {}};
     best.readiness = daily_readiness(input.match, input.daily, best.simulation, best.visits);
-    std::set<std::size_t> assigned;
-    for (const auto& visits : best.visits) assigned.insert(visits.begin(), visits.end());
+    std::vector<core::Quantity> assigned(input.match.spots.size(), 0);
+    for (const auto& visits : best.visits)
+        for (const auto spot : visits) ++assigned[spot];
     auto pathfinder_result = pathfinding::Pathfinder::create(input.match.map, input.daily.traffic);
     if (!pathfinder_result) {
         return RefuelPlannerOutcome::failure({PlannerErrorCode::InvalidInput,
@@ -173,7 +174,9 @@ RefuelPlannerOutcome make_refuel_plan(
                 if (!supply_route_result || !supply_route_result.value().has_value()) continue;
                 const auto supply_route = *supply_route_result.value();
                 for (std::size_t spot = 0; spot < input.match.spots.size() && !stopped; ++spot) {
-                    if (assigned.contains(spot)) continue;
+                    if (std::find(best.visits[patrol].begin(), best.visits[patrol].end(), spot)
+                            != best.visits[patrol].end()
+                        || assigned[spot] >= input.match.spots[spot].max_stock) continue;
                     for (const auto objective : {pathfinding::RouteObjective::Fastest,
                                                  pathfinding::RouteObjective::FuelEfficient}) {
                         if (now() >= deadline) { termination = RefuelTermination::Deadline; stopped = true; break; }
@@ -241,8 +244,9 @@ RefuelPlannerOutcome make_refuel_plan(
         }
         best = std::move(*round_best);
         prefixes = best.prefixes;
-        assigned.clear();
-        for (const auto& visits : best.visits) assigned.insert(visits.begin(), visits.end());
+        std::fill(assigned.begin(), assigned.end(), 0);
+        for (const auto& visits : best.visits)
+            for (const auto spot : visits) ++assigned[spot];
         ++accepted;
         termination = RefuelTermination::Completed;
     }
