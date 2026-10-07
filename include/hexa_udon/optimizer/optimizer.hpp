@@ -33,6 +33,7 @@ enum class Neighborhood : std::uint8_t {
     MoveTaskBetweenSupplies,
     RemoveRendezvous,
     AddRendezvous,
+    ReplaceAndRelocate,
     Count,
 };
 

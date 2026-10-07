@@ -17,6 +17,20 @@ int main() {
     if (core::hex_distance(distance_map, {9}, {1}) != 1) return 1;
     if (core::hex_distance(distance_map, {0}, {16}) != 2) return 1;
     if (core::hex_distance(distance_map, {0}, {27}) != 4) return 1;
+    core::MatchConfig compound_match{0, {60}, {20}, distance_map,
+        {{1, {1}, 1}, {2, {2}, 1}, {3, {3}, 1}}, {{0}}, 20, 1, 1, 2};
+    core::DailyState compound_daily{100, 0,
+        {{core::AgentKind::Patrol, {0}, 20}}, {}, {}};
+    simulator::MatchProgress compound_progress;
+    optimizer::StructuredSolution compound_solution{{{0, {0, 1}, {}}}, {}};
+    std::mt19937_64 compound_random(30013);
+    if (!optimizer::apply_neighborhood(compound_solution,
+            optimizer::Neighborhood::ReplaceAndRelocate,
+            {compound_match, compound_daily, compound_progress}, compound_random)) return 1;
+    if (compound_solution.patrol_routes[0].spot_indices.size() != 2
+        || std::find(compound_solution.patrol_routes[0].spot_indices.begin(),
+                     compound_solution.patrol_routes[0].spot_indices.end(), 2)
+            == compound_solution.patrol_routes[0].spot_indices.end()) return 1;
     core::MatchConfig replacement_match{0, {60}, {20}, distance_map,
         {{1, {1}, 1}, {1, {2}, 2}, {1, {20}, 4}}, {{0}}, 20, 1, 1, 2};
     core::DailyState replacement_daily{100, 0,
