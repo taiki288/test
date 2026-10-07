@@ -1,6 +1,7 @@
 #include "hexa_udon/app/auto_client.hpp"
 #include "hexa_udon/app/production_profile.hpp"
 #include "hexa_udon/app/lan_worker.hpp"
+#include "hexa_udon/protocol/file_security.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -87,6 +88,12 @@ struct Options {
     std::size_t optimizer_iterations = 10000;
     std::optional<std::string> worker_listen;
     std::string worker_token_environment;
+    std::filesystem::path worker_log;
+    std::string run_id;
+    std::size_t worker_index = 0;
+    std::size_t worker_count = 1;
+    std::string worker_profile_identity = "profile-set-v2";
+    std::string worker_evaluator_identity = "daily-improvement-candidate-v1";
     std::vector<std::string> lan_worker_values;
     std::int64_t lan_worker_timeout_ms = 0;
 };
@@ -99,6 +106,7 @@ void usage() {
               << "  hexa_udon show-state --session-dir DIR\n"
               << "  hexa_udon validate-profile --profile FILE (offline; no token or HTTP)\n"
               << "  hexa_udon worker --listen 127.0.0.1:PORT --worker-token-env NAME\n"
+              << "  hexa_udon worker-preflight --listen HOST:PORT --worker-token-env NAME\n"
               << "Options: --token-env NAME --session-dir DIR --log-dir DIR --poll-ms N\n"
               << "         --connect-timeout-ms N --total-timeout-ms N --safety-seconds N\n"
               << "         --max-get-retries N --log-level info|warning|error\n";
@@ -111,6 +119,7 @@ void usage() {
     std::cerr << "         --profile FILE (approved v1/v2 policy; auto/recover; no tuning overrides; 32x32 profile uses [1,3])\n";
     std::cerr << "         --profile-set v2 (auto only; select approved v2 profile from the first /setting response)\n";
     std::cerr << "         --lan-worker HOST:PORT (daily-improvement opt-in; repeatable) --lan-worker-timeout-ms N\n";
+    std::cerr << "         --worker-index N --worker-count N --worker-log FILE --run-id ID\n";
 }
 
 template <typename T>
@@ -168,6 +177,12 @@ std::optional<Options> parse_options(int argc, char** argv) {
         else if (value == "--optimizer-iterations") { const auto* item = next(); if (!item || !parse_integer(item, options.optimizer_iterations)) return {}; }
         else if (value == "--listen") { const auto* item = next(); if (!item || options.worker_listen) return {}; options.worker_listen = item; }
         else if (value == "--worker-token-env") { const auto* item = next(); if (!item || !options.worker_token_environment.empty()) return {}; options.worker_token_environment = item; }
+        else if (value == "--worker-log") { const auto* item = next(); if (!item) return {}; options.worker_log = item; }
+        else if (value == "--run-id") { const auto* item = next(); if (!item) return {}; options.run_id = item; }
+        else if (value == "--worker-index") { const auto* item = next(); if (!item || !parse_integer(item, options.worker_index)) return {}; }
+        else if (value == "--worker-count") { const auto* item = next(); if (!item || !parse_integer(item, options.worker_count)) return {}; }
+        else if (value == "--worker-profile-identity") { const auto* item = next(); if (!item) return {}; options.worker_profile_identity = item; }
+        else if (value == "--worker-evaluator-identity") { const auto* item = next(); if (!item) return {}; options.worker_evaluator_identity = item; }
         else if (value == "--lan-worker") { const auto* item = next(); if (!item) return {}; options.lan_worker_values.emplace_back(item); }
         else if (value == "--lan-worker-timeout-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.lan_worker_timeout_ms)) return {}; }
         else return std::nullopt;
@@ -176,12 +191,13 @@ std::optional<Options> parse_options(int argc, char** argv) {
 }
 
 bool valid(const Options& options) {
-    if (options.command == "worker") {
+    if (options.command == "worker" || options.command == "worker-preflight") {
         return options.worker_listen.has_value() && !options.worker_token_environment.empty()
             && !options.execute && options.base_url.empty() && options.profile == std::nullopt
             && options.profile_set == std::nullopt && options.lan_worker_values.empty()
             && options.token_environment == "PROCON_TOKEN"
-            && app::parse_lan_worker_endpoint(*options.worker_listen).has_value();
+            && app::parse_lan_worker_endpoint(*options.worker_listen).has_value()
+            && options.worker_count > 0 && options.worker_index < options.worker_count;
     }
     if (!options.lan_worker_values.empty() && options.command != "auto") return false;
     if (!options.lan_worker_values.empty() && options.planner != "daily-improvement"
@@ -266,8 +282,38 @@ int main(int argc, char** argv) {
         const auto endpoint = app::parse_lan_worker_endpoint(*options->worker_listen);
         if (!endpoint) { std::cerr << "worker requires a private or loopback listen address\n"; return 2; }
         std::signal(SIGINT, signal_handler); std::signal(SIGTERM, signal_handler);
-        return app::run_lan_worker({*endpoint, options->worker_token_environment, 262144},
+        app::LanWorkerConfig worker_config{*endpoint, options->worker_token_environment, 262144,
+            options->worker_index, options->worker_count, options->worker_log, options->run_id,
+            options->worker_profile_identity, options->worker_evaluator_identity};
+        return app::run_lan_worker(worker_config,
                                    [] { return stop_requested != 0; }, std::cout);
+    }
+    if (options->command == "worker-preflight") {
+        const auto endpoint = app::parse_lan_worker_endpoint(*options->worker_listen);
+        const char* secret = std::getenv(options->worker_token_environment.c_str());
+        if (!endpoint || secret == nullptr || *secret == '\0') {
+            std::cerr << "worker-preflight=failed reason=secret-missing-or-endpoint-invalid\n";
+            return 2;
+        }
+        const auto reply = app::request_lan_worker_preflight(
+            *endpoint, secret, options->worker_index, options->worker_count,
+            std::chrono::milliseconds{options->lan_worker_timeout_ms > 0
+                ? options->lan_worker_timeout_ms : 1000});
+        if (!reply.success) {
+            std::cout << "worker-preflight=failed classification="
+                      << (reply.failure_classification.empty() ? "unknown" : reply.failure_classification)
+                      << '\n';
+            return 1;
+        }
+        std::cout << "worker-preflight=ok protocolSchemaVersion="
+                  << reply.payload.value("workerProtocolSchemaVersion", 0)
+                  << " buildFingerprint=" << reply.payload.value("workerBuildFingerprint", "unknown")
+                  << " workerIndex=" << reply.payload.value("logicalWorkerIndex", -1)
+                  << " workerCount=" << reply.payload.value("logicalWorkerCount", 0)
+                  << " evaluatorIdentity=" << reply.payload.value("workerEvaluatorIdentity", "unknown")
+                  << " profileIdentity=" << reply.payload.value("workerProfileIdentity", "unknown")
+                  << " secretConfigured=true\n";
+        return 0;
     }
     if (options->profile) {
         if ((options->command != "auto" && options->command != "recover" && options->command != "validate-profile") || options->profile_override) {
@@ -290,6 +336,9 @@ int main(int argc, char** argv) {
     std::error_code error;
     std::filesystem::create_directories(options->log_directory, error);
     if (error) { std::cerr << "Cannot create log directory\n"; return 1; }
+    if (!protocol::secure_directory(options->log_directory)) {
+        std::cerr << "Cannot secure log directory\n"; return 1;
+    }
     const auto log_level = options->log_level == "error"
         ? protocol::OperationLogEntry::Level::Error
         : options->log_level == "warning" ? protocol::OperationLogEntry::Level::Warning

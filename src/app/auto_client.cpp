@@ -1,4 +1,5 @@
 #include "hexa_udon/app/auto_client.hpp"
+#include "hexa_udon/protocol/file_security.hpp"
 
 #include "hexa_udon/planner/refuel_planner.hpp"
 #include "hexa_udon/planner/prematch_type_selector.hpp"
@@ -517,6 +518,14 @@ RunResult AutoCompetitionClient::run() {
     std::error_code directory_error;
     std::filesystem::create_directories(config_.state_directory, directory_error);
     if (directory_error) return {RunStatus::Failed, "cannot create state directory"};
+    if (!protocol::secure_directory(config_.state_directory)) {
+        return {RunStatus::Failed, "cannot secure state directory"};
+    }
+    const auto existing_state = config_.state_directory / "session.json";
+    if (std::filesystem::exists(existing_state)
+        && !protocol::secure_file(existing_state)) {
+        return {RunStatus::Failed, "cannot secure existing state file"};
+    }
 
     std::optional<SessionDirectoryLock> lock;
     if (config_.mode == RunMode::Execute) {
@@ -1076,6 +1085,7 @@ RunResult AutoCompetitionClient::run() {
                             std::string observation_claim = "timeout";
                             std::string observation_adoption = "baseline-retained";
                             std::string observation_rejection_reason;
+                            std::string observation_failure_classification;
                             std::string observation_comparison = "not-evaluated";
                             std::string observation_strict_revalidation = "not-started";
                             nlohmann::json observation_mismatch_fields = nlohmann::json::array();
@@ -1107,6 +1117,7 @@ RunResult AutoCompetitionClient::run() {
                                         result.record.value("mainBestCandidateAtSharedDeadline", false)},
                                     {"mainBestCandidateStrictVerified",
                                         result.record.value("mainBestCandidateStrictVerified", false)},
+                                    {"failureClassification", observation_failure_classification},
                                     {"claim", observation_claim}, {"strictRevalidation", observation_strict_revalidation},
                                     {"rejectionReason", observation_rejection_reason},
                                     {"comparison", observation_comparison},
@@ -1132,6 +1143,7 @@ RunResult AutoCompetitionClient::run() {
                                 const auto failure_classification = reply.failure_classification.empty()
                                     ? classify_worker_failure(reply.error, worker_now() >= hard_deadline)
                                     : reply.failure_classification;
+                                observation_failure_classification = failure_classification;
                                 const auto is_timeout = failure_classification.ends_with("-timeout")
                                     || failure_classification == "timeout";
                                 const auto failure_termination = is_timeout
@@ -1177,6 +1189,7 @@ RunResult AutoCompetitionClient::run() {
                                 if (!parsed) {
                                     observation_claim = "mismatch";
                                     observation_rejection_reason = "protocol-failure";
+                                    observation_failure_classification = "frame-decode-failure";
                                     result.reason = "candidate-action-invalid";
                                     continue;
                                 }
@@ -1195,6 +1208,7 @@ RunResult AutoCompetitionClient::run() {
                                     result.record["mainBestCandidateStrictVerified"] = best_candidate.has_value();
                                     observation_claim = "mismatch";
                                     observation_rejection_reason = "deadline-exhausted";
+                                    observation_failure_classification = "deadline-exhausted";
                                     result.reason = "candidate-unverified-deadline";
                                     continue;
                                 }
@@ -1206,6 +1220,7 @@ RunResult AutoCompetitionClient::run() {
                                     observation_claim = "mismatch";
                                     observation_strict_revalidation = "failed";
                                     observation_rejection_reason = "strict-revalidation-failed";
+                                    observation_failure_classification = "strict-failure";
                                     result.reason = "candidate-simulator-rejected";
                                     continue;
                                 }
@@ -1259,6 +1274,7 @@ RunResult AutoCompetitionClient::run() {
                                     observation_claim = termination_class == "fallback"
                                         ? "fallback" : "mismatch";
                                     observation_rejection_reason = termination_class;
+                                    observation_failure_classification = termination_class;
                                     continue;
                                 }
                                 compare("requestIdDigest",
@@ -1271,6 +1287,28 @@ RunResult AutoCompetitionClient::run() {
                                 compare("seed", worker_request.at("plannerInput").at("plannerSeed"), reply.payload.value("plannerSeed", nlohmann::json(nullptr)));
                                 compare("workerIndex", worker_request.at("workerIndex"), reply.payload.value("workerIndex", nlohmann::json(nullptr)));
                                 compare("workerCount", worker_request.at("workerCount"), reply.payload.value("workerCount", nlohmann::json(nullptr)));
+                                // New worker identity fields are optional so old replies remain
+                                // decodable.  When present, they are claims about the worker
+                                // process itself, not request echoes.
+                                if (reply.payload.contains("workerBuildFingerprint"))
+                                    compare("workerBuildFingerprint", worker_build_fingerprint(),
+                                        reply.payload.at("workerBuildFingerprint"));
+                                if (reply.payload.contains("workerProtocolSchemaVersion"))
+                                    compare("workerProtocolSchemaVersion", worker_protocol_schema_version(),
+                                        reply.payload.at("workerProtocolSchemaVersion"));
+                                if (reply.payload.contains("workerEvaluatorIdentity"))
+                                    compare("workerEvaluatorIdentity", worker_evaluator_identity(),
+                                        reply.payload.at("workerEvaluatorIdentity"));
+                                if (reply.payload.contains("workerProfileIdentity"))
+                                    compare("workerProfileIdentity",
+                                        canonical_json_hash(worker_request.at("policyIdentity")),
+                                        reply.payload.at("workerProfileIdentity"));
+                                if (reply.payload.contains("logicalWorkerIndex"))
+                                    compare("logicalWorkerIndex", worker_request.at("workerIndex"),
+                                        reply.payload.at("logicalWorkerIndex"));
+                                if (reply.payload.contains("logicalWorkerCount"))
+                                    compare("logicalWorkerCount", worker_request.at("workerCount"),
+                                        reply.payload.at("logicalWorkerCount"));
                                 compare("startStateHash", start_hash, reply.payload.value("startStateHash", nlohmann::json(nullptr)));
                                 compare("actionHash", action_hash, reply.payload.value("actionHash", nlohmann::json(nullptr)));
                                 compare("planHash", plan_hash, reply.payload.value("planHash", nlohmann::json(nullptr)));
@@ -1280,6 +1318,7 @@ RunResult AutoCompetitionClient::run() {
                                 if (!mismatches.empty()) {
                                     observation_claim = "mismatch";
                                     observation_rejection_reason = "claim-mismatch";
+                                    observation_failure_classification = "claim-mismatch";
                                     observation_mismatch_fields = mismatches;
                                     worker_claim_mismatch = true;
                                     result.record["lanWorkerClaimDiagnostics"] = {{"workerEndpointDigest", endpoint_digest}, {"schemaVersion", reply.payload.value("protocolVersion", 0)}, {"evaluatorVersion", reply.payload.value("evaluatorVersion", "")}, {"requestIdDigest", protocol::request_id_digest_or_missing(worker_request.at("requestId"))}, {"fields", std::move(mismatches)}, {"workerTermination", worker_termination_diagnostic}, {"workerBestCandidateAtLocalDeadline", worker_best_at_local_deadline}, {"workerBestCandidateStrictVerified", worker_strict_verified}, {"mainRevalidationTermination", main_revalidation_termination}, {"mainBestCandidateAtSharedDeadline", main_deadline_best}, {"mainBestCandidateStrictVerified", main_deadline_best}, {"mainRevalidationFailureReason", ""}, {"fallback", "baseline-retained"}};
@@ -1300,6 +1339,8 @@ RunResult AutoCompetitionClient::run() {
                                     : candidate_score == baseline_score ? "readiness-lost" : "score-lost";
                                 if (!candidate_better)
                                     observation_rejection_reason = observation_comparison;
+                                if (!candidate_better && observation_comparison == "readiness-lost")
+                                    observation_failure_classification = "readiness-lost";
                                 if (candidate_better) {
                                     const bool deterministic_better = !best_candidate
                                         || planner::better_official_score(candidate_score, best_candidate->score)
