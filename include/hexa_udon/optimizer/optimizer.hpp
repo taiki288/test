@@ -79,6 +79,12 @@ private:
 [[nodiscard]] OrdinalResult score_ordinal(
     const planner::OfficialScore& score, const ScoreBounds& bounds);
 
+// Search-only delta. Final adoption continues to use the exact official
+// lexicographic comparison; this keeps annealing temperatures scale-stable.
+[[nodiscard]] double annealing_energy_delta(
+    const planner::OfficialScore& candidate,
+    const planner::OfficialScore& current) noexcept;
+
 struct NeighborhoodStatistics {
     std::size_t generated = 0;
     std::size_t prefiltered = 0;
