@@ -68,8 +68,8 @@ prepare_session_for_match() {
 }
 
 # you can custom waiting time(limited 180)
-echo "Waiting for the match setting (up to 120 seconds)..."
-setting_deadline=$((SECONDS + 120))
+echo "Waiting for the match setting (up to 180 seconds)..."
+setting_deadline=$((SECONDS + 180))
 while :; do
   : > run/setting-response.json
   http_status=$(curl -sS \
@@ -113,6 +113,7 @@ run_client() {
     --token-env PROCON_TOKEN \
     --profile-set v2 \
     --planner daily-improvement \
+    --max-get-retries 200 \
     --execute \
     2>&1 | tee run/client-output.log
 }
