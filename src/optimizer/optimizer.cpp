@@ -138,7 +138,7 @@ std::optional<BuiltCandidate> build_candidate(
     planner::InternalTieBreak tie;
     std::vector<std::int64_t> elapsed_by_agent(plan.size(), 0);
     std::vector<std::vector<RouteOccurrence>> occurrences(plan.size());
-    std::set<std::size_t> globally_assigned;
+    std::vector<core::Quantity> assigned_counts(input.match.spots.size(), 0);
     for (const auto& route_plan : solution.patrol_routes) {
         if (route_plan.agent_index >= plan.size()
             || input.daily.own_agents[route_plan.agent_index].kind != core::AgentKind::Patrol
@@ -149,7 +149,11 @@ std::optional<BuiltCandidate> build_candidate(
         occurrences[route_plan.agent_index].push_back({position, 0, 0});
         for (std::size_t leg = 0; leg < route_plan.spot_indices.size(); ++leg) {
             const auto spot = route_plan.spot_indices[leg];
-            if (spot >= input.match.spots.size() || !globally_assigned.insert(spot).second) return std::nullopt;
+            if (spot >= input.match.spots.size()
+                || std::find(route_plan.spot_indices.begin(),
+                             route_plan.spot_indices.begin() + static_cast<std::ptrdiff_t>(leg),
+                             spot) != route_plan.spot_indices.begin() + static_cast<std::ptrdiff_t>(leg)
+                || ++assigned_counts[spot] > input.match.spots[spot].max_stock) return std::nullopt;
             auto found = pathfinder.find_route(position, input.match.spots[spot].position,
                                                route_plan.objectives[leg]);
             if (!found) { diagnostic = found.error().message; return std::nullopt; }

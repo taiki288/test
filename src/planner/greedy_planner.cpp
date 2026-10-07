@@ -320,7 +320,7 @@ make_greedy_plan(const PlannerInput &input, const PlannerConfig &config,
     return PlannerOutcome::success(std::move(fallback));
   }
   auto pathfinder = std::move(pathfinder_result).value();
-  std::set<std::size_t> assigned_spots;
+  std::vector<core::Quantity> assigned_spot_counts(input.match.spots.size(), 0);
   const auto day_steps =
       input.match.day_steps[static_cast<std::size_t>(input.daily.day)];
 
@@ -338,7 +338,9 @@ make_greedy_plan(const PlannerInput &input, const PlannerConfig &config,
       }
       for (std::size_t spot = 0;
            spot < input.match.spots.size() && !limit_reached; ++spot) {
-        if (assigned_spots.contains(spot)) {
+        if (std::find(best.routes[agent].spots.begin(), best.routes[agent].spots.end(), spot)
+                != best.routes[agent].spots.end()
+            || assigned_spot_counts[spot] >= input.match.spots[spot].max_stock) {
           continue;
         }
         for (const auto objective :
@@ -431,9 +433,11 @@ make_greedy_plan(const PlannerInput &input, const PlannerConfig &config,
     }
     if (round_best.has_value()) {
       best = std::move(*round_best);
-      assigned_spots.clear();
+      std::fill(assigned_spot_counts.begin(), assigned_spot_counts.end(), 0);
       for (const auto &route : best.routes) {
-        assigned_spots.insert(route.spots.begin(), route.spots.end());
+        for (const auto spot : route.spots) {
+          ++assigned_spot_counts[spot];
+        }
       }
       ++accepted;
       termination = PlannerTermination::Completed;
