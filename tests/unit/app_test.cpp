@@ -17,6 +17,9 @@ int main() {
     if (core::hex_distance(distance_map, {9}, {1}) != 1) return 1;
     if (core::hex_distance(distance_map, {0}, {16}) != 2) return 1;
     if (core::hex_distance(distance_map, {0}, {27}) != 4) return 1;
+    if (optimizer::annealing_energy_delta({9, 100, 1000}, {10, 0, 0}) != -1.0) return 1;
+    if (optimizer::annealing_energy_delta({10, 19, 1000}, {10, 20, 0}) != -1.0) return 1;
+    if (optimizer::annealing_energy_delta({10, 20, 99}, {10, 20, 100}) != -1.0) return 1;
     const optimizer::ScoreBounds phase_bounds{10, 30, 100};
     if (optimizer::optimization_phase({9, 30, 100}, phase_bounds)
         != optimizer::OptimizationPhase::TotalUniqueBrands) return 1;

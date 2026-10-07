@@ -273,16 +273,6 @@ double temperature(const OptimizerConfig& config, const std::size_t iteration) {
     return config.initial_temperature * std::pow(config.final_temperature / config.initial_temperature, fraction);
 }
 
-ScoreBounds score_bounds(const planner::PlannerInput& input) {
-    std::set<core::Quantity> brands(input.previous_progress.acquired_brands.begin(),
-                                    input.previous_progress.acquired_brands.end());
-    std::uint64_t stock = static_cast<std::uint64_t>(input.previous_progress.total_balls);
-    for (const auto& spot : input.match.spots) { brands.insert(spot.brand); stock += static_cast<std::uint64_t>(spot.max_stock); }
-    const auto previous_daily = std::accumulate(input.previous_progress.daily_distinct_brand_counts.begin(),
-        input.previous_progress.daily_distinct_brand_counts.end(), std::uint64_t{0});
-    return {static_cast<std::uint64_t>(brands.size()), previous_daily + brands.size(), stock};
-}
-
 }  // namespace
 
 OrdinalResult::OrdinalResult(std::variant<std::uint64_t, OrdinalFailure> storage) : storage_(std::move(storage)) {}
@@ -313,6 +303,15 @@ OrdinalResult score_ordinal(const planner::OfficialScore& score, const ScoreBoun
     return OrdinalResult::success(value);
 }
 
+double annealing_energy_delta(const planner::OfficialScore& candidate,
+                              const planner::OfficialScore& current) noexcept {
+    if (candidate.total_unique_brands != current.total_unique_brands)
+        return static_cast<double>(candidate.total_unique_brands - current.total_unique_brands);
+    if (candidate.cumulative_daily_unique_brands != current.cumulative_daily_unique_brands)
+        return static_cast<double>(candidate.cumulative_daily_unique_brands
+            - current.cumulative_daily_unique_brands);
+    return static_cast<double>(candidate.total_bowls - current.total_bowls);
+}
 OptimizationPhase optimization_phase(
     const planner::OfficialScore& score, const ScoreBounds& bounds) noexcept {
     if (static_cast<std::uint64_t>(std::max<std::int64_t>(0, score.total_unique_brands))
@@ -655,6 +654,7 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
     std::array<double,neighborhood_count> weights=config.neighborhood_weights;
     if(std::all_of(weights.begin(),weights.end(),[](double x){return x<=0.0;}))weights.fill(1.0);
     for(auto& x:weights)if(!std::isfinite(x)||x<0.0)x=0.0;
+    std::discrete_distribution<std::size_t> select(weights.begin(),weights.end());
     const auto bounds=score_bounds(input); std::size_t invalid_run=0;
     bool deadline_hit = false;
     bool best_is_candidate = false;
@@ -703,14 +703,10 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
             rejection_reason = official_improved ? "official-score-improved"
                 : (readiness_changed ? "readiness-improved" : "deterministic-tie-break");
         } else if (official_lower) {
-            const auto candidate_ordinal=score_ordinal(candidate->score,bounds);
-            const auto current_ordinal=score_ordinal(current.score,bounds);
-            if(candidate_ordinal&&current_ordinal){
-                const auto delta=static_cast<long double>(candidate_ordinal.value())-static_cast<long double>(current_ordinal.value());
-                const auto temp=std::max(config.final_temperature,temperature(config,iteration));
-                const auto probability=std::exp(static_cast<double>(delta/static_cast<long double>(temp)));
-                accept=std::uniform_real_distribution<double>(0.0,1.0)(random)<probability;
-            }
+            const auto delta = annealing_energy_delta(candidate->score, current.score);
+            const auto temp=std::max(config.final_temperature,temperature(config,iteration));
+            const auto probability=std::exp(delta/temp);
+            accept=std::uniform_real_distribution<double>(0.0,1.0)(random)<probability;
             rejection_reason = accept ? "annealed-lower-official-score" : "lower-official-score-rejected";
         } else {
             // OfficialScore equality never enters annealing (delta would be zero).
