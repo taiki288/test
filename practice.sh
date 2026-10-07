@@ -12,6 +12,61 @@ echo "Configuring and building Release client..."
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release || exit $?
 cmake --build build --parallel 4 || exit $?
 
+archive_previous_session() {
+  local archive="run/session-previous-$(date +%Y%m%d-%H%M%S)"
+  local suffix=1
+  while [[ -e "$archive" ]]; do
+    archive="run/session-previous-$(date +%Y%m%d-%H%M%S)-$suffix"
+    ((suffix += 1))
+  done
+
+  mv run/session "$archive" || return $?
+  echo "Previous match state archived to $archive."
+}
+
+prepare_session_for_match() {
+  local state=run/session/session.json
+  [[ -f "$state" ]] || return 0
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "jq is required to inspect the saved session safely." >&2
+    return 1
+  fi
+
+  local current_match_id saved_match_id
+  current_match_id=$(jq -er '
+    (.map.height | tostring) + "x" + (.map.width | tostring) + ":" +
+    (.agents | map(tostring) | join(",")) + ","
+  ' run/setting-response.json) || {
+    echo "Cannot determine the current match identity from /setting." >&2
+    return 1
+  }
+  saved_match_id=$(jq -er '.matchId' "$state") || {
+    echo "Cannot determine the saved session identity; keeping it for manual inspection." >&2
+    return 1
+  }
+
+  [[ "$saved_match_id" == "$current_match_id" ]] && return 0
+
+  # The current writer always writes submissionAttempted.  Older session files
+  # did not, so an Accepted record is considered known only when its HTTP
+  # response and revision prove that the server accepted it.
+  if ! jq -e '
+    (.agentKindsUnknown == true) or
+    any(.submissions[]?;
+      (.classification == 5) or
+      ((.submissionAttempted == null) and
+       (has("submissionAttempted") or
+        .classification != 0 or .httpStatus != 200 or .revision == null)))
+  ' "$state" >/dev/null; then
+    archive_previous_session
+    return $?
+  fi
+
+  echo "Previous match state has an unknown POST outcome; keeping run/session for manual inspection." >&2
+  return 1
+}
+
 # you can custom waiting time(limited 180)
 echo "Waiting for the match setting (up to 120 seconds)..."
 setting_deadline=$((SECONDS + 120))
@@ -50,6 +105,8 @@ while :; do
   sleep 1
 done
 
+prepare_session_for_match || exit $?
+
 run_client() {
   ./build/hexa_udon auto \
     --base-url "https://procon37arena.online" \
@@ -62,28 +119,5 @@ run_client() {
 
 run_client
 client_status=$?
-
-if [[ $client_status -ne 0 ]] \
-  && grep -Fq "persisted state belongs to another match" run/client-output.log \
-  && [[ -d run/session ]]; then
-  if [[ -f run/session/session.json ]] \
-    && { grep -Eq '"agentKindsUnknown"[[:space:]]*:[[:space:]]*true' run/session/session.json \
-      || grep -Eq '"classification"[[:space:]]*:[[:space:]]*5([,}[:space:]]|$)' run/session/session.json; }; then
-    echo "Previous match state has an unknown POST outcome; not archiving automatically." >&2
-    exit "$client_status"
-  fi
-
-  archive="run/session-previous-$(date +%Y%m%d-%H%M%S)"
-  suffix=1
-  while [[ -e "$archive" ]]; do
-    archive="run/session-previous-$(date +%Y%m%d-%H%M%S)-$suffix"
-    ((suffix += 1))
-  done
-
-  mv run/session "$archive"
-  echo "Previous match state archived to $archive; retrying."
-  run_client
-  client_status=$?
-fi
 
 exit "$client_status"
