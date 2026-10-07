@@ -17,6 +17,20 @@ int main() {
     if (core::hex_distance(distance_map, {9}, {1}) != 1) return 1;
     if (core::hex_distance(distance_map, {0}, {16}) != 2) return 1;
     if (core::hex_distance(distance_map, {0}, {27}) != 4) return 1;
+    core::MatchConfig meeting_match{0, {60}, {20}, distance_map,
+        {{1, {9}, 1}}, {{0}, {1}}, 20, 1, 1, 2};
+    core::DailyState meeting_daily{100, 0,
+        {{core::AgentKind::Patrol, {0}, 20},
+         {core::AgentKind::Supply, {1}, 20}}, {}, {}};
+    simulator::MatchProgress meeting_progress;
+    optimizer::StructuredSolution meeting_solution{{{0, {0}, {}}}, {}};
+    std::mt19937_64 meeting_random(30013);
+    if (!optimizer::apply_neighborhood(meeting_solution,
+            optimizer::Neighborhood::AddRendezvous,
+            {meeting_match, meeting_daily, meeting_progress}, meeting_random)) return 1;
+    if (meeting_solution.rendezvous.size() != 1
+        || (meeting_solution.rendezvous[0].cell != core::CellIndex{0}
+            && meeting_solution.rendezvous[0].cell != core::CellIndex{9})) return 1;
 
     core::MapDefinition map = std::move(core::MapDefinition::create(16, 16,
         std::vector<core::Terrain>(256, core::Terrain::Plain)).value());
