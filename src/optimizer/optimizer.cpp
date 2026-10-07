@@ -35,6 +35,7 @@ const char* neighborhood_name(const Neighborhood n) {
     case Neighborhood::MoveTaskBetweenSupplies: return "MoveTaskBetweenSupplies";
     case Neighborhood::RemoveRendezvous: return "RemoveRendezvous";
     case Neighborhood::AddRendezvous: return "AddRendezvous";
+    case Neighborhood::ReplaceAndRelocate: return "ReplaceAndRelocate";
     case Neighborhood::Count: return "Count";
     }
     return "unknown";
@@ -534,6 +535,29 @@ bool apply_neighborhood(StructuredSolution& s, const Neighborhood n,
         if (supplies.empty() || !cell) return false;
         s.rendezvous.push_back(
             {a.agent_index, supplies[pick(random, supplies.size())], *cell, 0});
+        return true;
+    }
+    case Neighborhood::ReplaceAndRelocate: {
+        if (a.spot_indices.empty()) return false;
+        std::set<std::size_t> used;
+        for (const auto& route : s.patrol_routes)
+            used.insert(route.spot_indices.begin(), route.spot_indices.end());
+        std::vector<std::size_t> unused;
+        for (std::size_t spot = 0; spot < input.match.spots.size(); ++spot)
+            if (!used.contains(spot)) unused.push_back(spot);
+        if (unused.empty()) return false;
+        const auto from = pick(random, a.spot_indices.size());
+        a.spot_indices[from] = unused[pick(random, unused.size())];
+        a.objectives[from] = pathfinding::RouteObjective::Fastest;
+        if (a.spot_indices.size() > 1) {
+            const auto spot = a.spot_indices[from];
+            const auto objective = a.objectives[from];
+            a.spot_indices.erase(a.spot_indices.begin() + static_cast<std::ptrdiff_t>(from));
+            a.objectives.erase(a.objectives.begin() + static_cast<std::ptrdiff_t>(from));
+            const auto to = pick(random, a.spot_indices.size() + 1);
+            a.spot_indices.insert(a.spot_indices.begin() + static_cast<std::ptrdiff_t>(to), spot);
+            a.objectives.insert(a.objectives.begin() + static_cast<std::ptrdiff_t>(to), objective);
+        }
         return true;
     }
     case Neighborhood::Count: return false;
