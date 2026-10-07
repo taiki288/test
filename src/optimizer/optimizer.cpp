@@ -275,6 +275,32 @@ double temperature(const OptimizerConfig& config, const std::size_t iteration) {
 
 }  // namespace
 
+ScoreBounds score_bounds(const planner::PlannerInput& input) {
+    std::set<core::Quantity> brands(
+        input.previous_progress.acquired_brands.begin(),
+        input.previous_progress.acquired_brands.end());
+
+    std::uint64_t stock =
+        static_cast<std::uint64_t>(input.previous_progress.total_balls);
+
+    for (const auto& spot : input.match.spots) {
+        brands.insert(spot.brand);
+        stock += static_cast<std::uint64_t>(spot.max_stock);
+    }
+
+    const auto previous_daily =
+        std::accumulate(
+            input.previous_progress.daily_distinct_brand_counts.begin(),
+            input.previous_progress.daily_distinct_brand_counts.end(),
+            std::uint64_t{0});
+
+    return {
+        static_cast<std::uint64_t>(brands.size()),
+        previous_daily + brands.size(),
+        stock
+    };
+}
+
 OrdinalResult::OrdinalResult(std::variant<std::uint64_t, OrdinalFailure> storage) : storage_(std::move(storage)) {}
 OrdinalResult OrdinalResult::success(std::uint64_t value) { return OrdinalResult(value); }
 OrdinalResult OrdinalResult::failure(OrdinalFailure error) { return OrdinalResult(std::move(error)); }
@@ -654,7 +680,7 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
     std::array<double,neighborhood_count> weights=config.neighborhood_weights;
     if(std::all_of(weights.begin(),weights.end(),[](double x){return x<=0.0;}))weights.fill(1.0);
     for(auto& x:weights)if(!std::isfinite(x)||x<0.0)x=0.0;
-    std::discrete_distribution<std::size_t> select(weights.begin(),weights.end());
+    std::discrete_distribution<std::size_t> neighborhood_select(weights.begin(),weights.end());
     const auto bounds=score_bounds(input); std::size_t invalid_run=0;
     bool deadline_hit = false;
     bool best_is_candidate = false;
@@ -675,8 +701,8 @@ OptimizerOutcome optimize(const planner::PlannerInput& input, const planner::Pla
             phase_weights[static_cast<std::size_t>(Neighborhood::AddSpot)] *= 4.0;
             phase_weights[static_cast<std::size_t>(Neighborhood::ReplaceSameBrand)] *= 4.0;
         }
-        std::discrete_distribution<std::size_t> select(phase_weights.begin(),phase_weights.end());
-        const auto neighborhood=static_cast<Neighborhood>(select(random));
+        std::discrete_distribution<std::size_t> phase_select(phase_weights.begin(),phase_weights.end());
+        const auto neighborhood=static_cast<Neighborhood>(phase_select(random));
         auto& stats=result.neighborhoods[static_cast<std::size_t>(neighborhood)]; ++stats.generated; ++result.generated_candidates;
         auto proposed=current_solution;
         std::string mutation_kind;
