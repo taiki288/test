@@ -33,6 +33,7 @@ enum class Neighborhood : std::uint8_t {
     MoveTaskBetweenSupplies,
     RemoveRendezvous,
     AddRendezvous,
+    ReplaceAndRelocate,
     Count,
 };
 
@@ -59,6 +60,11 @@ struct ScoreBounds {
     std::uint64_t cumulative_daily_unique_brands = 0;
     std::uint64_t total_bowls = 0;
 };
+
+enum class OptimizationPhase { TotalUniqueBrands, DailyUniqueBrands, TotalBowls };
+
+[[nodiscard]] OptimizationPhase optimization_phase(
+    const planner::OfficialScore& score, const ScoreBounds& bounds) noexcept;
 
 enum class OrdinalError { NegativeScore, OutOfBounds, Overflow };
 
