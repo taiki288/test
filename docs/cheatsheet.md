@@ -23,7 +23,16 @@ export PROCON_TOKEN='<練習場の token>'
 
 `practice.sh` は build（`build/`）→ `/setting` が出るまで最大 180 秒待つ → 前の試合の Session を `run/session-previous-<時刻>` に退避 → `auto --execute` を実行する。出力は `run/client-output.log` にも残る。1 試合ごとに起動し直す。
 
-スレッド数を変える・LAN worker を使うときは `practice.sh` の `run_client` の行に `--threads N` や `--lan-worker HOST:PORT` を足す。
+試合に出続ける（Ctrl+C で止める。最初に 1 回だけ build し、試合ごとの client の出力は `run/client-output-<時刻>.log` に残る）:
+
+```bash
+export PROCON_TOKEN='<練習場の token>'
+./practice-loop.sh
+```
+
+認証エラー・結果の分からない POST・`RecoveryRequired` が出たらループも止まるので、`show-state` で確かめてから起動し直す。
+
+`practice.sh` / `practice-loop.sh` に付けた引数は `hexa_udon auto` に渡る（例: `./practice-loop.sh --threads 8 --lan-worker 192.168.1.12:39001`）。
 
 ## 本番
 

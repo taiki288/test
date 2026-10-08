@@ -8,9 +8,15 @@ if [[ -z ${PROCON_TOKEN:-} ]]; then
   exit 1
 fi
 
-echo "Configuring and building Release client..."
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release || exit $?
-cmake --build build --parallel 4 || exit $?
+# practice.sh に付けた引数は hexa_udon auto にそのまま渡す（例: ./practice.sh --threads 8 --lan-worker 192.168.1.12:39001）
+extra_args=("$@")
+
+# practice-loop.sh は最初に 1 回だけ build して PRACTICE_SKIP_BUILD=1 で呼ぶ（試合ごとに build すると試合に入るのが遅れるため）
+if [[ -z ${PRACTICE_SKIP_BUILD:-} ]]; then
+  echo "Configuring and building Release client..."
+  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release || exit $?
+  cmake --build build --parallel 4 || exit $?
+fi
 
 archive_previous_session() {
   local archive="run/session-previous-$(date +%Y%m%d-%H%M%S)"
@@ -100,7 +106,8 @@ while :; do
     if [[ -s run/setting-response.json ]]; then
       cat run/setting-response.json >&2
     fi
-    exit 1
+    # 試合がまだ無いだけなので、ほかの失敗（1）と分けて practice-loop.sh が待ち直せるようにする
+    exit 3
   fi
   sleep 1
 done
@@ -113,6 +120,7 @@ run_client() {
     --token-env PROCON_TOKEN \
     --max-get-retries 200 \
     --execute \
+    "${extra_args[@]}" \
     2>&1 | tee run/client-output.log
 }
 
