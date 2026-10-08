@@ -3,7 +3,7 @@
 
 namespace hexa_udon::solver {
 
-Rng rng;
+thread_local Rng rng;
 int H, W, NC;
 vector<int> cellType;
 vector<Spot> spots;
@@ -17,6 +17,7 @@ vector<int> daySteps, daySeconds;
 int today;
 bool choosingKinds;
 double interimSec;
+int threads = 1;
 function<void(const vector<vector<int>>&)> interimSink;
 
 void emitInterim(const vector<vector<int>>& plan) {

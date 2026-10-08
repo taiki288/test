@@ -18,11 +18,13 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <queue>
 #include <set>
 #include <span>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -44,7 +46,8 @@ struct Rng {
     int nextInt(int n) { return (int)(next() % (uint64_t)n); }
     double nextDouble() { return static_cast<double>(next() >> 11) * (1.0 / 9007199254740992.0); }
 };
-extern Rng rng;
+// スレッドで並列に解くので、乱数はスレッドごとに持つ
+extern thread_local Rng rng;
 
 // ------------------------------ 問題（src/core/problem.cpp） ------------------------------
 enum Terrain { PLAIN = 0, ROAD = 1, MOUNTAIN = 2, POND = 3 };
@@ -63,6 +66,7 @@ extern vector<int> daySteps, daySeconds;
 extern int today;                    // planDay を呼ぶ日（0 始まり）
 extern bool choosingKinds;           // 種別決めのシミュレーションの中で planDay を呼んでいる
 extern double interimSec;            // 途中の計画を出す間隔（秒）。0 なら出さない
+extern int threads;                  // 1 日の計画を同時に解くスレッドの数
 
 // 方向: 0 左上, 1 右上, 2 右, 3 右下, 4 左下, 5 左（偶数行が右にずれる）
 const int DX_EVEN[6] = {0, 1, 1, 1, 0, -1}, DX_ODD[6] = {-1, 0, 1, 0, -1, -1};

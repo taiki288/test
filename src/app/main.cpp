@@ -1,5 +1,6 @@
 #include "hexa_udon/app/auto_client.hpp"
 #include "hexa_udon/app/lan_worker.hpp"
+#include "hexa_udon/solver.hpp"
 #include "hexa_udon/protocol/file_security.hpp"
 
 #include <nlohmann/json.hpp>
@@ -13,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -80,6 +82,7 @@ struct Options {
     std::string worker_evaluator_identity = "solver-v1";
     std::vector<std::string> lan_worker_values;
     std::int64_t lan_worker_timeout_ms = 0;
+    std::int64_t threads = 0;
 };
 
 void usage() {
@@ -94,7 +97,8 @@ void usage() {
               << "         --connect-timeout-ms N --total-timeout-ms N --safety-seconds N\n"
               << "         --max-get-retries N --log-level info|warning|error\n";
     std::cerr << "         --kind-ms N (types; default: size deadline 60/90/120 s minus elapsed and safety)\n"
-              << "         --interim-ms N (resubmit improved plans at this interval; 0 = final plan only) --seed N\n";
+              << "         --interim-ms N (resubmit improved plans at this interval; 0 = final plan only) --seed N\n"
+              << "         --threads N (solver threads per day; default: half of the logical processors)\n";
     std::cerr << "         --lan-worker HOST:PORT (repeatable) --lan-worker-timeout-ms N\n";
     std::cerr << "         --worker-index N --worker-count N --worker-log FILE --run-id ID\n";
 }
@@ -141,6 +145,7 @@ std::optional<Options> parse_options(int argc, char** argv) {
         else if (value == "--worker-profile-identity") { const auto* item = next(); if (!item) return {}; options.worker_profile_identity = item; }
         else if (value == "--worker-evaluator-identity") { const auto* item = next(); if (!item) return {}; options.worker_evaluator_identity = item; }
         else if (value == "--lan-worker") { const auto* item = next(); if (!item) return {}; options.lan_worker_values.emplace_back(item); }
+        else if (value == "--threads") { const auto* item = next(); if (!item || !parse_integer(item, options.threads)) return {}; }
         else if (value == "--lan-worker-timeout-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.lan_worker_timeout_ms)) return {}; }
         else return std::nullopt;
     }
@@ -220,6 +225,9 @@ int main(int argc, char** argv) {
     }
     const auto options = parse_options(argc, argv);
     if (!options || !valid(*options)) { usage(); return 2; }
+    // 全部のスレッドを使うと通信や OS の処理が遅れるので、指定がなければ論理スレッド数の半分にする
+    hexa_udon::solver::threads = options->threads > 0 ? static_cast<int>(options->threads)
+        : std::max(1, static_cast<int>(std::thread::hardware_concurrency()) / 2);
     if (options->command == "worker") {
         const auto endpoint = app::parse_lan_worker_endpoint(*options->worker_listen);
         if (!endpoint) { std::cerr << "worker requires a private or loopback listen address\n"; return 2; }

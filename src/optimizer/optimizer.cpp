@@ -12,8 +12,15 @@ struct Planner {
     vector<vector<int>> brandSpots;
     vector<int> hubJump, hubCells;
     map<vector<int>, int> tomorrowMemo;
-    double emittedLasting = -1e18;
-    vector<vector<int>> emittedPlan;
+    // 出し直した計画。スレッドで並列に解くときは全スレッドで 1 つを共有する
+    struct Emitted {
+        mutex lock;
+        double lasting = -1e18;
+        vector<vector<int>> plan;
+    };
+    Emitted ownEmitted;
+    Emitted* emitted = &ownEmitted;
+    bool verbose = true;
 
     Planner(const vector<Agent>& st_, const vector<int>& status, int steps_, bool last)
         : st(st_), steps(steps_), lastDay(last), router(status), brandSpots(B) {
@@ -44,10 +51,11 @@ struct Planner {
 
     // 動き終えた時刻の項を除いた評価が良くなったときだけ出し直すのは、今日の玉にも翌日にも効かない改善で出し直すと回答時間で負けるため
     void emit(const vector<vector<int>>& plan, double lasting) {
-        if (lasting <= emittedLasting || lasting < -1e17) return;
+        lock_guard<mutex> g(emitted->lock);
+        if (lasting <= emitted->lasting || lasting < -1e17) return;
         emitInterim(plan);
-        emittedLasting = lasting;
-        emittedPlan = plan;
+        emitted->lasting = lasting;
+        emitted->plan = plan;
     }
 
     // 補給車の予定の候補: 今の位置、密度の高いスポット、巡回車の位置で一日中待つ
@@ -234,11 +242,15 @@ struct Planner {
                 }
             } else if (schChanged) day.setSchedule(cur.schedule);
         }
-        cerr << "[solver] iter=" << iter << " accepted=" << accepted << " score=" << best.score;
-        for (int op = 0; op < OPS; op++) cerr << " " << OP_NAMES[op] << "=" << gains[op] << "/" << tries[op];
-        cerr << "\n";
+        if (verbose) {
+            cerr << "[solver] iter=" << iter << " accepted=" << accepted << " score=" << best.score;
+            for (int op = 0; op < OPS; op++) cerr << " " << OP_NAMES[op] << "=" << gains[op] << "/" << tries[op];
+            cerr << "\n";
+        }
         return best;
     }
+
+    Solution result;
 
     vector<vector<int>> plan(double timeMs) {
         Timer tm;
@@ -255,16 +267,46 @@ struct Planner {
         if (!choosingKinds) {
             emit(best.plan, best.lasting);
             best = improve(best, timeMs - tm.ms());
-            if (interimSec > 0 && emittedLasting >= best.lasting) return emittedPlan;
+            result = best;
+            if (interimSec > 0 && emitted->lasting >= best.lasting) return emitted->plan;
         }
         return best.plan;
     }
 };
 
+// 乱数の種だけを変えた焼きなましを threads 本同時に回し、一番良い解を使う。
+// 焼きなましは時間内に収束していても、種によって行き着く解が違い、良い方を選ぶと玉が増えるため。
+// スレッド 0 は 1 本で解くときと同じ種を使う
 vector<vector<int>> planDay(const vector<Agent>& st, const vector<int>& status, const vector<char>&,
                             int steps, bool lastDay, double timeMs) {
-    Planner p(st, status, steps, lastDay);
-    return p.plan(timeMs);
+    int T = choosingKinds ? 1 : max(1, threads);
+    if (T == 1) {
+        Planner p(st, status, steps, lastDay);
+        return p.plan(timeMs);
+    }
+    Planner::Emitted emitted;
+    vector<Planner::Solution> results(T);
+    vector<vector<vector<int>>> plans(T);
+    Rng base = rng;
+    vector<thread> workers;
+    for (int k = 0; k < T; k++)
+        workers.emplace_back([&, k] {
+            rng = base;
+            rng.x ^= (uint64_t)k * 0x9E3779B97F4A7C15ULL;
+            Planner p(st, status, steps, lastDay);
+            p.emitted = &emitted;
+            p.verbose = k == 0;
+            plans[k] = p.plan(timeMs);
+            results[k] = p.result;
+        });
+    for (auto& w : workers) w.join();
+    int bestK = 0;
+    for (int k = 1; k < T; k++) if (results[k].score > results[bestK].score) bestK = k;
+    cerr << "[solver] threads=" << T << " best=" << bestK << " score=" << results[bestK].score << "\n";
+    if (results[bestK].score < -1e17) return plans[0];
+    // 出し直した計画より良くなっていなければ、出し直した計画をそのまま返す（回答時間で負けないため）
+    if (interimSec > 0 && emitted.lasting >= results[bestK].lasting) return emitted.plan;
+    return results[bestK].plan;
 }
 
 }  // namespace hexa_udon::solver
