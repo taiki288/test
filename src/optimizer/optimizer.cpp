@@ -21,6 +21,7 @@ struct Planner {
     Emitted ownEmitted;
     Emitted* emitted = &ownEmitted;
     bool verbose = true;
+    long long iterations = 0;  // 焼きなましを回した回数（ログ用）
 
     Planner(const vector<Agent>& st_, const vector<int>& status, int steps_, bool last)
         : st(st_), steps(steps_), lastDay(last), router(status), brandSpots(B) {
@@ -242,6 +243,7 @@ struct Planner {
                 }
             } else if (schChanged) day.setSchedule(cur.schedule);
         }
+        iterations = iter;
         if (verbose) {
             cerr << "[solver] iter=" << iter << " accepted=" << accepted << " score=" << best.score;
             for (int op = 0; op < OPS; op++) cerr << " " << OP_NAMES[op] << "=" << gains[op] << "/" << tries[op];
@@ -300,6 +302,7 @@ pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, c
     Planner::Emitted emitted;
     vector<Planner::Solution> results(T);
     vector<vector<vector<int>>> plans(T);
+    vector<long long> iters(T, 0);
     Rng base = rng;
     vector<thread> workers;
     for (int k = 0; k < T; k++)
@@ -312,11 +315,19 @@ pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, c
             p.warm = warm;
             plans[k] = p.plan(timeMs);
             results[k] = p.result;
+            iters[k] = p.iterations;
         });
     for (auto& w : workers) w.join();
     int bestK = 0;
     for (int k = 1; k < T; k++) if (results[k].score > results[bestK].score) bestK = k;
-    cerr << "[solver] threads=" << T << " best=" << bestK << " score=" << results[bestK].score << "\n";
+    // スレッドごとの玉を並べて、種の違いでどれだけ差が出ているかを見られるようにする
+    cerr << "[solver] threads=" << T << " best=" << bestK << " score=" << results[bestK].score
+         << " iters=" << accumulate(iters.begin(), iters.end(), 0LL) << " balls=[";
+    for (int k = 0; k < T; k++) {
+        if (k) cerr << ",";
+        cerr << (results[k].plan.empty() ? -1 : simulateDay(st, results[k].plan, status, steps).balls);
+    }
+    cerr << "]\n";
     if (results[bestK].score < -1e17) return {results[bestK], plans[0]};
     // 出し直した計画より良くなっていなければ、出し直した計画をそのまま返す（回答時間で負けないため）
     if (interimSec > 0 && emitted.lasting >= results[bestK].lasting) return {results[bestK], emitted.plan};

@@ -404,7 +404,9 @@ bool AutoCompetitionClient::has_unknown_submission(const session::SessionSnapsho
 }
 
 void AutoCompetitionClient::print_kinds(const std::vector<core::AgentKind>& kinds) {
-    output_ << "type-selection=complete agents=" << kinds.size() << '\n';
+    output_ << "type-selection=complete agents=" << kinds.size() << " kinds=[";
+    for (std::size_t i = 0; i < kinds.size(); ++i) output_ << (i ? "," : "") << core::to_int(kinds[i]);
+    output_ << "] supplies=" << std::count(kinds.begin(), kinds.end(), core::AgentKind::Supply) << '\n';
 }
 
 void AutoCompetitionClient::print_day_summary(
@@ -508,6 +510,19 @@ RunResult AutoCompetitionClient::run() {
                           setting.error().message};
     const auto setting_received_at = clock_.wall_now();
     output_ << "startup=setting-received\n";
+    {
+        const auto& s = setting.value();
+        const auto size = s.map.width() + s.map.height();
+        std::set<core::Quantity> brands;
+        for (const auto& spot : s.spots) brands.insert(spot.brand);
+        output_ << "match board=" << s.map.width() << 'x' << s.map.height() << " agents=" << s.initial_agent_positions.size()
+                << " days=" << s.day_steps.size() << " brands=" << brands.size() << " spots=" << s.spots.size()
+                << " fuel=" << s.fuel_limit << " daySteps=[";
+        for (std::size_t d = 0; d < s.day_steps.size(); ++d) output_ << (d ? "," : "") << s.day_steps[d];
+        output_ << "] perSize=[" << std::fixed << std::setprecision(2);
+        for (std::size_t d = 0; d < s.day_steps.size(); ++d) output_ << (d ? "," : "") << static_cast<double>(s.day_steps[d]) / size;
+        output_ << "]" << std::defaultfloat << '\n';
+    }
     solver::loadProblem(setting.value());
 
     const auto state_path = config_.state_directory / "session.json";
@@ -618,6 +633,14 @@ RunResult AutoCompetitionClient::run() {
     std::optional<core::Quantity> observed_day = competition.snapshot().last_observed_day;
     bool reconcile_server_state = observed_day.has_value();
     std::set<core::Quantity> dry_processed;
+    // 試合の最後にまとめて出す日ごとの結果
+    struct DayLog {
+        core::Quantity day, steps;
+        std::size_t brands;
+        core::Quantity balls, cap;
+        double answer_seconds;
+    };
+    std::vector<DayLog> day_logs;
     const auto total_days = static_cast<core::Quantity>(setting.value().day_steps.size());
     const auto log_daily_failure = [&](const core::Quantity day, const std::string& phase,
                                        const std::string& reason,
@@ -728,6 +751,13 @@ RunResult AutoCompetitionClient::run() {
                 if (!saved) return {RunStatus::Failed, saved.error().message};
             }
             session::SubmissionRecord last_record = submitted.value();
+            // 回答時間は、日の始まりから最後に受け付けられた提出までの秒数
+            const auto day_start = unix_time(daily.value().ends_at)
+                - std::chrono::seconds{setting.value().day_seconds.at(static_cast<std::size_t>(daily.value().day))};
+            const auto seconds_since_start = [&] {
+                return std::chrono::duration<double>(clock_.wall_now() - day_start).count();
+            };
+            double answer_seconds = seconds_since_start();
 
             const auto& day_state = daily.value();
             const auto steps = setting.value().day_steps.at(static_cast<std::size_t>(day_state.day));
@@ -752,7 +782,11 @@ RunResult AutoCompetitionClient::run() {
                 adopted = plan;
                 adopted_source = source;
                 last_record = sent.value();
-                output_ << "post=" << source << ' ' << (sent.value().revision ? "success" : "dry-run") << '\n';
+                answer_seconds = seconds_since_start();
+                output_ << "post=" << source << ' ' << (sent.value().revision ? "success" : "dry-run")
+                        << " t=" << std::fixed << std::setprecision(1) << answer_seconds << std::defaultfloat
+                        << "s brands=" << sent.value().simulation.brands.size()
+                        << " balls=" << sent.value().simulation.total_balls << '\n';
                 if (config_.mode == RunMode::Execute) static_cast<void>(competition.save(state_path));
             };
 
@@ -900,9 +934,37 @@ RunResult AutoCompetitionClient::run() {
                 if (!saved) return {RunStatus::Failed, saved.error().message};
             }
             print_day_summary(setting.value(), day_state, last_record, competition.progress(), record);
+            {
+                // 玉の上限: スポットごとに min(在庫, 巡回車の台数)
+                const auto patrols = std::count_if(day_state.own_agents.begin(), day_state.own_agents.end(),
+                    [](const auto& a) { return a.kind == core::AgentKind::Patrol; });
+                core::Quantity cap = 0;
+                for (const auto& spot : setting.value().spots) cap += std::min<core::Quantity>(spot.max_stock, static_cast<core::Quantity>(patrols));
+                day_logs.push_back({day_state.day, steps, last_record.simulation.brands.size(),
+                                    last_record.simulation.total_balls, cap, answer_seconds});
+            }
         }
 
         if (daily.value().day == total_days - 1) {
+            if (!day_logs.empty()) {
+                std::set<core::Quantity> brands;
+                for (const auto& spot : setting.value().spots) brands.insert(spot.brand);
+                const auto size = setting.value().map.width() + setting.value().map.height();
+                core::Quantity balls = 0, cap = 0;
+                std::size_t day_brands = 0;
+                double seconds = 0;
+                output_ << std::fixed << std::setprecision(1);
+                for (const auto& d : day_logs) {
+                    output_ << "match-summary day=" << d.day << " steps=" << d.steps << " ("
+                            << std::setprecision(2) << static_cast<double>(d.steps) / size << std::setprecision(1)
+                            << "x) brands=" << d.brands << '/' << brands.size() << " balls=" << d.balls << '/' << d.cap
+                            << " time=" << d.answer_seconds << "s\n";
+                    balls += d.balls; cap += d.cap; day_brands += d.brands; seconds += d.answer_seconds;
+                }
+                output_ << "match-total days=" << day_logs.size() << " matchBrands=" << competition.progress().acquired_brands.size()
+                        << '/' << brands.size() << " dayBrands=" << day_brands << " balls=" << balls << '/' << cap
+                        << " (" << (cap ? 100.0 * balls / cap : 0.0) << "%) time=" << seconds << "s\n" << std::defaultfloat;
+            }
             const auto end = unix_time(daily.value().ends_at);
             if (clock_.wall_now() < end) {
                 const auto duration = end - clock_.wall_now();
