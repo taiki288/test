@@ -250,18 +250,27 @@ struct Planner {
         return best;
     }
 
+    optional<Solution> warm;  // 1 日目が始まる前に作っておいた解（あればここから改善する）
     Solution result;
 
     vector<vector<int>> plan(double timeMs) {
         Timer tm;
         Day day(st, steps, today, router, patrols, supplies, brandSpots);
         Solution best;
-        auto cands = scheduleCandidates();
-        if (choosingKinds && cands.size() > 8) cands.resize(8);
-        for (auto& sch : cands) {
-            if (best.score > -1e17 && tm.ms() > timeMs * 0.3) break;
-            Solution s = build(day, sch);
-            if (s.score > best.score) best = s;
+        if (warm) {
+            day.setSchedule(warm->schedule);
+            Day::Eval e = day.evaluate(warm->routes);
+            if (e.score > -1e17) best = {warm->schedule, warm->routes, total(e), e.plan, lastingTotal(e)};
+        }
+        // 作っておいた解は予定の候補を一通り試したあとのものなので、候補から作り直さずに改善へ進む
+        if (best.score < -1e17) {
+            auto cands = scheduleCandidates();
+            if (choosingKinds && cands.size() > 8) cands.resize(8);
+            for (auto& sch : cands) {
+                if (best.score > -1e17 && tm.ms() > timeMs * 0.3) break;
+                Solution s = build(day, sch);
+                if (s.score > best.score) best = s;
+            }
         }
         if (best.score < -1e17) return allWait(steps);
         if (!choosingKinds) {
@@ -274,15 +283,19 @@ struct Planner {
     }
 };
 
-// 乱数の種だけを変えた焼きなましを threads 本同時に回し、一番良い解を使う。
+namespace {
+
+// 乱数の種だけを変えた焼きなましを threads 本同時に回し、一番良い解と、提出する計画を返す。
 // 焼きなましは時間内に収束していても、種によって行き着く解が違い、良い方を選ぶと玉が増えるため。
 // スレッド 0 は 1 本で解くときと同じ種を使う
-vector<vector<int>> planDay(const vector<Agent>& st, const vector<int>& status, const vector<char>&,
-                            int steps, bool lastDay, double timeMs) {
+pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, const vector<int>& status, int steps,
+                                                      bool lastDay, double timeMs, const optional<Planner::Solution>& warm) {
     int T = choosingKinds ? 1 : max(1, threads);
     if (T == 1) {
         Planner p(st, status, steps, lastDay);
-        return p.plan(timeMs);
+        p.warm = warm;
+        auto plan = p.plan(timeMs);
+        return {p.result, plan};
     }
     Planner::Emitted emitted;
     vector<Planner::Solution> results(T);
@@ -296,6 +309,7 @@ vector<vector<int>> planDay(const vector<Agent>& st, const vector<int>& status, 
             Planner p(st, status, steps, lastDay);
             p.emitted = &emitted;
             p.verbose = k == 0;
+            p.warm = warm;
             plans[k] = p.plan(timeMs);
             results[k] = p.result;
         });
@@ -303,10 +317,52 @@ vector<vector<int>> planDay(const vector<Agent>& st, const vector<int>& status, 
     int bestK = 0;
     for (int k = 1; k < T; k++) if (results[k].score > results[bestK].score) bestK = k;
     cerr << "[solver] threads=" << T << " best=" << bestK << " score=" << results[bestK].score << "\n";
-    if (results[bestK].score < -1e17) return plans[0];
+    if (results[bestK].score < -1e17) return {results[bestK], plans[0]};
     // 出し直した計画より良くなっていなければ、出し直した計画をそのまま返す（回答時間で負けないため）
-    if (interimSec > 0 && emitted.lasting >= results[bestK].lasting) return emitted.plan;
-    return results[bestK].plan;
+    if (interimSec > 0 && emitted.lasting >= results[bestK].lasting) return {results[bestK], emitted.plan};
+    return {results[bestK], results[bestK].plan};
+}
+
+// planDay0 が作った 1 日目の解と、そのときの朝の状態
+struct Day0Plan {
+    vector<Agent> st;
+    Planner::Solution solution;
+};
+optional<Day0Plan> day0Plan;
+mutex day0Lock;
+
+bool sameAgents(const vector<Agent>& a, const vector<Agent>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++)
+        if (a[i].kind != b[i].kind || a[i].pos != b[i].pos || a[i].fuel != b[i].fuel) return false;
+    return true;
+}
+
+}  // namespace
+
+vector<vector<int>> planDay(const vector<Agent>& st, const vector<int>& status, const vector<char>&,
+                            int steps, bool lastDay, double timeMs) {
+    optional<Planner::Solution> warm;
+    if (today == 0 && !choosingKinds) {
+        lock_guard<mutex> g(day0Lock);
+        if (day0Plan && sameAgents(day0Plan->st, st)) warm = day0Plan->solution;
+        day0Plan.reset();
+    }
+    if (warm) cerr << "[solver] 1 日目が始まる前に作った解から始める\n";
+    return solveDay(st, status, steps, lastDay, timeMs, warm).second;
+}
+
+void planDay0(const vector<int>& kinds, double timeMs) {
+    if (timeMs <= 0) return;
+    vector<Agent> st(NA);
+    for (int i = 0; i < NA; i++) st[i] = {kinds[i], agentStart[i], FUEL_LIMIT};
+    today = 0;
+    // 1 日目の道路は全部空いている（ルール）
+    auto solution = solveDay(st, vector<int>(NC, 0), daySteps[0], D == 1, timeMs, nullopt).first;
+    cerr << "[solver] 1 日目を " << (int)timeMs << "ms 計画しておいた score=" << solution.score << "\n";
+    if (solution.score < -1e17) return;
+    lock_guard<mutex> g(day0Lock);
+    day0Plan = Day0Plan{st, solution};
 }
 
 }  // namespace hexa_udon::solver

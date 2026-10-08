@@ -20,6 +20,7 @@
 #include <map>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <queue>
 #include <set>
 #include <span>
@@ -233,6 +234,9 @@ struct Day {
 // ------------------------------ 1 日の計画（src/optimizer/optimizer.cpp） ------------------------------
 vector<vector<int>> planDay(const vector<Agent>& st, const vector<int>& status, const vector<char>& before,
                             int steps, bool lastDay, double timeMs);
+// 種別を出したあと、1 日目が始まるまでの時間で 1 日目を計画しておく。
+// 1 日目の planDay は、朝の状態が同じならその解から始める（1 日目の道路は全部空いていて、朝の状態も種別で決まるため）
+void planDay0(const vector<int>& kinds, double timeMs);
 
 // ------------------------------ 種別決め（src/planner/prematch_type_selector.cpp） ------------------------------
 vector<vector<int>> kindCandidates();

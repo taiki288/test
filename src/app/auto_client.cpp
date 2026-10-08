@@ -528,6 +528,13 @@ RunResult AutoCompetitionClient::run() {
             return {RunStatus::RecoveryRequired, "saved session contains an unknown POST outcome"};
         }
     }
+    // 種別の締切。設定を受け取った時刻から数え、startsAt（1 日目が始まる時刻）の方が早ければそこまで
+    auto deadline_seconds = kind_deadline_seconds(setting.value().map.width());
+    const auto received = std::chrono::duration_cast<std::chrono::seconds>(
+        setting_received_at.time_since_epoch()).count();
+    if (setting.value().starts_at > received)
+        deadline_seconds = std::min<std::int64_t>(deadline_seconds, setting.value().starts_at - received);
+    const auto kind_deadline = setting_received_at + std::chrono::seconds{deadline_seconds};
     std::vector<core::AgentKind> selected_kinds;
     if (initial.snapshot().submitted_agent_kinds) {
         selected_kinds = *initial.snapshot().submitted_agent_kinds;
@@ -540,12 +547,6 @@ RunResult AutoCompetitionClient::run() {
         selected_kinds = *config_.explicit_kinds;
         output_ << "type-selection=explicit\n";
     } else {
-        // 締切は設定を受け取った時刻から数える。startsAt（1 日目が始まる時刻）の方が早ければそこまで
-        auto deadline_seconds = kind_deadline_seconds(setting.value().map.width());
-        const auto received = std::chrono::duration_cast<std::chrono::seconds>(
-            setting_received_at.time_since_epoch()).count();
-        if (setting.value().starts_at > received)
-            deadline_seconds = std::min<std::int64_t>(deadline_seconds, setting.value().starts_at - received);
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             clock_.wall_now() - setting_received_at).count();
         const auto budget = config_.kind_budget.count() > 0 ? config_.kind_budget.count()
@@ -588,6 +589,20 @@ RunResult AutoCompetitionClient::run() {
         output_ << "post=agent-types success\n";
     } else if (config_.mode == RunMode::DryRun) {
         output_ << "post=agent-types dry-run\n";
+    }
+
+    // 種別を出したら、1 日目が始まるまで（種別の締切まで）別のスレッドで 1 日目を計画しておく。
+    // 途中から入り直したときは 1 日目が終わっているかもしれないので計画しない
+    std::future<void> day0_planning;
+    if (!initial.snapshot().last_observed_day) {
+        std::vector<int> kinds;
+        for (const auto kind : selected_kinds) kinds.push_back(core::to_int(kind));
+        const auto day0_ms = std::chrono::duration_cast<std::chrono::milliseconds>(kind_deadline - clock_.wall_now()).count();
+        if (day0_ms > 0) {
+            output_ << "day0-planning=start budgetMs=" << day0_ms << '\n';
+            day0_planning = std::async(std::launch::async,
+                [kinds, day0_ms] { solver::planDay0(kinds, static_cast<double>(day0_ms)); });
+        }
     }
 
     // Once type registration is complete, wait for the first daily state on GET /
@@ -779,6 +794,8 @@ RunResult AutoCompetitionClient::run() {
                 }
             }
 
+            // 1 日目の先読みが終わるまで待つ（同じ大域変数を使うため）
+            if (day0_planning.valid()) day0_planning.get();
             solver::today = day_state.day;
             solver::interimSec = config_.interim_seconds;
             solver::interimSink = [&](const std::vector<std::vector<int>>& plan) { submit(plan, "solver-interim"); };
