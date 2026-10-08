@@ -1,5 +1,5 @@
 #pragma once
-// session・client が使う 1 日のシミュレーション。中身は meet の simulateDay（src/simulator/simulator.cpp）
+// session・client が使う 1 日のシミュレーション。中身は solver の simulateDay（src/simulator/simulator.cpp）
 #include "hexa_udon/core/map_definition.hpp"
 #include "hexa_udon/core/models.hpp"
 #include "hexa_udon/simulator/action.hpp"

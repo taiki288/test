@@ -76,8 +76,8 @@ struct Options {
     std::string run_id;
     std::size_t worker_index = 0;
     std::size_t worker_count = 1;
-    std::string worker_profile_identity = "meet";
-    std::string worker_evaluator_identity = "meet-v1";
+    std::string worker_profile_identity = "solver";
+    std::string worker_evaluator_identity = "solver-v1";
     std::vector<std::string> lan_worker_values;
     std::int64_t lan_worker_timeout_ms = 0;
 };
@@ -211,6 +211,9 @@ int show_state(const std::filesystem::path& directory) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // 標準出力を書くたびに出す。パイプ（practice.sh の tee など）につなぐと既定ではためてから出すので、
+    // 提出や日ごとの結果の行が何十秒も遅れてログに出ていた
+    std::cout << std::unitbuf;
     if (argc == 1 || (argc > 1 && (std::string{argv[1]} == "--help" || std::string{argv[1]} == "help"))) {
         usage();
         return 0;

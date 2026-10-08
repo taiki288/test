@@ -1,7 +1,7 @@
 // Planner: 1 日の計画（初期解 → LNS ＋ 焼きなまし）（procon2026 の solvers/meet.cpp / common.hpp から移した。処理は元のまま）
-#include "hexa_udon/meet.hpp"
+#include "hexa_udon/solver.hpp"
 
-namespace hexa_udon::meet {
+namespace hexa_udon::solver {
 
 struct Planner {
     const vector<Agent>& st;
@@ -234,7 +234,7 @@ struct Planner {
                 }
             } else if (schChanged) day.setSchedule(cur.schedule);
         }
-        cerr << "[meet] iter=" << iter << " accepted=" << accepted << " score=" << best.score;
+        cerr << "[solver] iter=" << iter << " accepted=" << accepted << " score=" << best.score;
         for (int op = 0; op < OPS; op++) cerr << " " << OP_NAMES[op] << "=" << gains[op] << "/" << tries[op];
         cerr << "\n";
         return best;
@@ -267,4 +267,4 @@ vector<vector<int>> planDay(const vector<Agent>& st, const vector<int>& status, 
     return p.plan(timeMs);
 }
 
-}  // namespace hexa_udon::meet
+}  // namespace hexa_udon::solver

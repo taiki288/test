@@ -1,7 +1,7 @@
-// meet の問題（大域変数）と、o-udon の型との変換
-#include "hexa_udon/meet.hpp"
+// solver の問題（大域変数）と、o-udon の型との変換
+#include "hexa_udon/solver.hpp"
 
-namespace hexa_udon::meet {
+namespace hexa_udon::solver {
 
 Rng rng;
 int H, W, NC;
@@ -91,4 +91,4 @@ vector<vector<int>> fromActionPlan(const simulator::DayActionPlan& plan) {
     return out;
 }
 
-}  // namespace hexa_udon::meet
+}  // namespace hexa_udon::solver

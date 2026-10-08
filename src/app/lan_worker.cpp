@@ -1,5 +1,5 @@
 #include "hexa_udon/app/lan_worker.hpp"
-#include "hexa_udon/meet.hpp"
+#include "hexa_udon/solver.hpp"
 #include "hexa_udon/simulator/simulator.hpp"
 #include "hexa_udon/protocol/json_codec.hpp"
 #include "hexa_udon/protocol/request_id_digest.hpp"
@@ -34,7 +34,7 @@ constexpr auto default_reply_grace = std::chrono::milliseconds{100};
 #ifndef HEXA_UDON_BUILD_FINGERPRINT
 #define HEXA_UDON_BUILD_FINGERPRINT "unknown"
 #endif
-constexpr std::string_view evaluator_identity = "meet-v1";
+constexpr std::string_view evaluator_identity = "solver-v1";
 
 std::string hex_digest(std::string_view value) {
     // This is an identity/MAC token for the local protocol, not a password
@@ -513,8 +513,8 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                         ::close(client);
                         continue;
                     }
-                    // meet で計画する。worker ごとに乱数の種を変えて、main PC と違う解を探す
-                    namespace m = meet;
+                    // solver で計画する。worker ごとに乱数の種を変えて、main PC と違う解を探す
+                    namespace m = solver;
                     m::loadProblem(decoded->match);
                     m::rng.x = 88172645463325252ULL ^ (decoded->seed * 0x9E3779B97F4A7C15ULL);
                     m::today = decoded->daily.day;
@@ -532,7 +532,7 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                     const auto encoded = protocol::encode_actions(plan);
                     if (!simulation || !encoded) {
                         diagnostics.phase("planner", "failed", "planner-failure", 0);
-                        reply = response_failure("meet-plan-invalid", "planner_failure");
+                        reply = response_failure("solver-plan-invalid", "planner_failure");
                     } else {
                         const auto actions = nlohmann::json::parse(encoded.value());
                         const nlohmann::json end_state = agents_json(simulation.value().end_agents);

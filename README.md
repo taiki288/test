@@ -1,6 +1,6 @@
 # hexa-udon
 
-高専プロコン 2026 競技部門「ヘキサうどん」の C++20 クライアントです。公式 API との通信・Session の保存と復旧は o-udon の実装、種別決めと毎日の計画は meet（補給の時期と場所も計画に入れる LNS ＋ 焼きなまし）で行います。
+高専プロコン 2026 競技部門「ヘキサうどん」の C++20 クライアントです。公式 API との通信・Session の保存と復旧は o-udon の実装、種別決めと毎日の計画は solver（補給の時期と場所も計画に入れる LNS ＋ 焼きなまし）で行います。
 
 ## 1. ビルド
 
@@ -44,18 +44,18 @@ export PROCON_TOKEN='<official-token>'
 
 ### 1 試合の流れ
 
-1. `GET /setting` を受け取ったら、meet が種別（どの車を補給車にするか）を決めて `POST /agent` します。
+1. `GET /setting` を受け取ったら、solver が種別（どの車を補給車にするか）を決めて `POST /agent` します。
    持ち時間は盤の大きさごとの締切（16×16 / 24×24 / 32×32 で 60 / 90 / 120 秒）までの残りから `--safety-seconds` を引いた分です（`--kind-ms` で上書きできます）。
 2. 毎日、まず全員が待つ計画を出します（計画ができるまでの保険）。
-3. meet が日の締切の `--safety-seconds`（既定 3 秒）前までの残り時間の 85% で計画し、系列・玉・翌日に効く項が良くなるたびに `--interim-ms`（既定 3000）ごとに出し直します。最後の計画が直前に出したものと同じなら出し直しません（回答時間で負けないため）。
-4. 提出する計画はすべて、提出の前に meet のシミュレーター（公式ルールの再現）で確かめます。
+3. solver が日の締切の `--safety-seconds`（既定 3 秒）前までの残り時間の 85% で計画し、系列・玉・翌日に効く項が良くなるたびに `--interim-ms`（既定 3000）ごとに出し直します。最後の計画が直前に出したものと同じなら出し直しません（回答時間で負けないため）。
+4. 提出する計画はすべて、提出の前に solver のシミュレーター（公式ルールの再現）で確かめます。
 
 ### 主な option
 
 | option | 意味 |
 | --- | --- |
 | `--execute` | POST する（無ければ dry-run） |
-| `--types 0,0,0,1` | 種別を手で指定する（meet の種別決めをしない） |
+| `--types 0,0,0,1` | 種別を手で指定する（solver の種別決めをしない） |
 | `--kind-ms N` | 種別決めの持ち時間（既定: 締切から自動） |
 | `--interim-ms N` | 良くなった計画を出し直す間隔。0 なら最後の計画だけ |
 | `--safety-seconds N` | 日の締切の何秒前までに提出を終えるか（既定 3） |
@@ -66,7 +66,7 @@ export PROCON_TOKEN='<official-token>'
 
 ## 3. LAN worker（任意）
 
-別の PC（または同じ PC の別プロセス）で meet を乱数の種を変えて回し、主 PC の計画より公式の点（総系列 → 日別系列 → 玉）が高ければそれを使います。worker は公式 API・token に触れず、worker 専用 secret で loopback / private LAN だけで通信します。
+別の PC（または同じ PC の別プロセス）で solver を乱数の種を変えて回し、主 PC の計画より公式の点（総系列 → 日別系列 → 玉）が高ければそれを使います。worker は公式 API・token に触れず、worker 専用 secret で loopback / private LAN だけで通信します。
 
 ```bash
 export HEXA_LAN_WORKER_SECRET='<worker-only-secret>'
@@ -100,7 +100,7 @@ worker は日の締切の 1 秒前（`--lan-worker-timeout-ms` で上限を指�
 
 | 領域 | 場所 |
 | --- | --- |
-| meet の型と宣言 | `include/hexa_udon/meet.hpp` |
+| solver の型と宣言 | `include/hexa_udon/solver.hpp` |
 | 問題（大域変数）と o-udon の型との変換 | `src/core/problem.cpp` |
 | 1 日のシミュレーション（公式ルールの再現） | `src/simulator/simulator.cpp` |
 | 最短経路（最速 / 燃料最小） | `src/pathfinding/router.cpp` |

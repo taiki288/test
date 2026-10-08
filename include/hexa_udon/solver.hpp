@@ -1,4 +1,4 @@
-// meet: 補給も計画に入れる solver（procon2026 の solvers/meet.cpp, solvers/common.hpp を移したもの）。
+// solver: 種別決めと 1 日の計画（補給の時期と場所も計画に入れる LNS ＋ 焼きなまし）。procon2026 の solvers/meet.cpp, solvers/common.hpp を移したもの。
 // 処理は元のまま。定義は次のファイルに分けて置く:
 //   src/core/problem.cpp                    問題（大域変数）と o-udon の型との変換
 //   src/simulator/simulator.cpp             1 日のシミュレーション（ルール完全再現）
@@ -28,7 +28,7 @@
 #include <utility>
 #include <vector>
 
-namespace hexa_udon::meet {
+namespace hexa_udon::solver {
 using namespace std;
 
 const int INF_FUEL = 1 << 29;
@@ -242,4 +242,4 @@ struct MatchScore {
 MatchScore simulateMatch(const vector<int>& kinds, double timeMs);
 vector<int> solveKind(double timeMs);
 
-}  // namespace hexa_udon::meet
+}  // namespace hexa_udon::solver

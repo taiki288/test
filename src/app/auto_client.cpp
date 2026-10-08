@@ -1,7 +1,7 @@
 #include "hexa_udon/app/auto_client.hpp"
 #include "hexa_udon/protocol/file_security.hpp"
 
-#include "hexa_udon/meet.hpp"
+#include "hexa_udon/solver.hpp"
 #include "hexa_udon/simulator/simulator.hpp"
 #include "hexa_udon/protocol/json_codec.hpp"
 #include "hexa_udon/protocol/request_id_digest.hpp"
@@ -508,7 +508,7 @@ RunResult AutoCompetitionClient::run() {
                           setting.error().message};
     const auto setting_received_at = clock_.wall_now();
     output_ << "startup=setting-received\n";
-    meet::loadProblem(setting.value());
+    solver::loadProblem(setting.value());
 
     const auto state_path = config_.state_directory / "session.json";
     session::SessionController initial(api_, setting.value(), nullptr, logger_);
@@ -551,14 +551,14 @@ RunResult AutoCompetitionClient::run() {
         const auto budget = config_.kind_budget.count() > 0 ? config_.kind_budget.count()
             : std::max<std::int64_t>(1000, deadline_seconds * 1000 - elapsed
                 - std::chrono::duration_cast<std::chrono::milliseconds>(config_.safety_margin).count());
-        output_ << "type-selection=start mode=meet budgetMs=" << budget << '\n';
+        output_ << "type-selection=start mode=solver budgetMs=" << budget << '\n';
         // procon2026 の solver と同じく持ち時間の 8 割で選ぶ
-        const auto kinds = meet::solveKind(static_cast<double>(budget) * 0.8);
-        meet::choosingKinds = false;
+        const auto kinds = solver::solveKind(static_cast<double>(budget) * 0.8);
+        solver::choosingKinds = false;
         for (const int kind : kinds) selected_kinds.push_back(static_cast<core::AgentKind>(kind));
         protocol::OperationLogEntry selector_log;
         selector_log.timestamp_utc = protocol::utc_timestamp();
-        selector_log.operation = "meet-type-selection";
+        selector_log.operation = "solver-type-selection";
         selector_log.method = "LOCAL";
         selector_log.path = "Day0";
         selector_log.result = "types=";
@@ -718,13 +718,13 @@ RunResult AutoCompetitionClient::run() {
             const auto steps = setting.value().day_steps.at(static_cast<std::size_t>(day_state.day));
             const simulator::DaySimulationInput sim_input{setting.value().map, setting.value().spots,
                 setting.value().fuel_limit, steps, day_state.own_agents, day_state.traffic};
-            std::vector<std::vector<int>> adopted = meet::allWait(steps);
+            std::vector<std::vector<int>> adopted = solver::allWait(steps);
             std::string adopted_source = "wait";
             std::optional<RunResult> submit_failure;
             // 計画が変わったときだけ出し直す。失敗したらその日はもう出さない
             const auto submit = [&](const std::vector<std::vector<int>>& plan, const std::string& source) {
                 if (submit_failure || plan == adopted || clock_.now() >= deadline.stop_at) return;
-                auto sent = competition.submit_plan(meet::toActionPlan(plan), config_.mode == RunMode::DryRun,
+                auto sent = competition.submit_plan(solver::toActionPlan(plan), config_.mode == RunMode::DryRun,
                                                     deadline.stop_at, std::nullopt);
                 if (!sent) {
                     log_daily_failure(day_state.day, "transport-or-deadline", sent.error().message,
@@ -779,17 +779,17 @@ RunResult AutoCompetitionClient::run() {
                 }
             }
 
-            meet::today = day_state.day;
-            meet::interimSec = config_.interim_seconds;
-            meet::interimSink = [&](const std::vector<std::vector<int>>& plan) { submit(plan, "meet-interim"); };
+            solver::today = day_state.day;
+            solver::interimSec = config_.interim_seconds;
+            solver::interimSink = [&](const std::vector<std::vector<int>>& plan) { submit(plan, "solver-interim"); };
             const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline.stop_at - clock_.now()).count();
             // procon2026 の solver と同じく残り時間の 85% を計画に使う
-            const auto plan = meet::planDay(meet::agentsOf(day_state.own_agents), meet::statusOf(day_state.traffic),
-                                            std::vector<char>(meet::B, 0), steps, day_state.day == total_days - 1,
+            const auto plan = solver::planDay(solver::agentsOf(day_state.own_agents), solver::statusOf(day_state.traffic),
+                                            std::vector<char>(solver::B, 0), steps, day_state.day == total_days - 1,
                                             static_cast<double>(std::max<std::int64_t>(0, remaining_ms)) * 0.85);
-            meet::interimSink = nullptr;
-            const auto local = simulator::simulate_day(sim_input, meet::toActionPlan(plan));
+            solver::interimSink = nullptr;
+            const auto local = simulator::simulate_day(sim_input, solver::toActionPlan(plan));
             std::optional<WorkerCandidate> best_worker;
             nlohmann::json worker_observations = nlohmann::json::array();
             for (std::size_t index = 0; index < pending.size(); ++index) {
@@ -853,10 +853,10 @@ RunResult AutoCompetitionClient::run() {
             }
             // worker の計画は、自分の計画より公式の点が高いときだけ使う
             auto final_plan = plan;
-            std::string final_source = "meet";
+            std::string final_source = "solver";
             if (best_worker && (!local || simulator::better_official_score(best_worker->score,
                     simulator::official_score(previous_progress, local.value())))) {
-                final_plan = meet::fromActionPlan(best_worker->plan);
+                final_plan = solver::fromActionPlan(best_worker->plan);
                 final_source = "worker";
                 worker_observations[best_worker->worker_index]["adoption"] = "worker";
             }
@@ -866,7 +866,7 @@ RunResult AutoCompetitionClient::run() {
                 return *submit_failure;
             }
             const auto& adopted_simulation = last_record.simulation;
-            nlohmann::json record = {{"day", day_state.day}, {"planner", "meet"},
+            nlohmann::json record = {{"day", day_state.day}, {"planner", "solver"},
                 {"candidateSource", adopted_source}, {"adoptionReason", adopted_source},
                 {"predictedBalls", adopted_simulation.total_balls},
                 {"predictedBrands", adopted_simulation.brands},

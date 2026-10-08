@@ -1,8 +1,8 @@
 // 1 日のシミュレーション（ルール完全再現）（procon2026 の solvers/meet.cpp / common.hpp から移した。処理は元のまま）
-#include "hexa_udon/meet.hpp"
+#include "hexa_udon/solver.hpp"
 #include "hexa_udon/simulator/simulator.hpp"
 
-namespace hexa_udon::meet {
+namespace hexa_udon::solver {
 
 vector<int> statusFromStay(const vector<long long>& sumStay, int players) {
     vector<int> st(NC, 0);
@@ -88,7 +88,7 @@ DayResult simulateDay(const vector<Agent>& st, const vector<vector<int>>& plan, 
 
 vector<vector<int>> allWait(int steps) { return vector<vector<int>>(NA, vector<int>{-steps}); }
 
-}  // namespace hexa_udon::meet
+}  // namespace hexa_udon::solver
 
 namespace hexa_udon::simulator {
 
@@ -102,7 +102,7 @@ const SimulationError& SimulationOutcome::error() const& { return std::get<Simul
 SimulationOutcome::SimulationOutcome(std::variant<DaySimulationResult, SimulationError> storage) : storage_(std::move(storage)) {}
 
 SimulationOutcome simulate_day(const DaySimulationInput& input, const DayActionPlan& plan) {
-    namespace m = meet;
+    namespace m = solver;
     // 計画中（途中の計画の提出）にも呼ばれるので、同じ盤面なら入れ直さない
     if (m::W != input.map.width() || m::H != input.map.height() || m::S != (int)input.spots.size() || m::FUEL_LIMIT != input.fuel_limit)
         m::loadMap(input.map, input.spots, input.fuel_limit);

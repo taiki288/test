@@ -49,7 +49,7 @@ add_library(hexa_udon_prematch_selector src/planner/prematch_type_selector.cpp)
 target_include_directories(hexa_udon_prematch_selector PUBLIC include)
 target_link_libraries(hexa_udon_prematch_selector PUBLIC hexa_udon_optimizer)
 hexa_udon_enable_warnings(hexa_udon_prematch_selector)
-# meet から移したコードは int と size_t を混ぜて書いているので、型変換と符号と名前の隠れの警告は出さない
+# procon2026 から移した solver のコードは int と size_t を混ぜて書いているので、型変換と符号と名前の隠れの警告は出さない
 set_source_files_properties(src/core/problem.cpp src/simulator/simulator.cpp src/pathfinding/router.cpp
     src/planner/day_planner.cpp src/optimizer/optimizer.cpp src/planner/prematch_type_selector.cpp
     PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-sign-conversion;-Wno-sign-compare;-Wno-shadow;-Wno-missing-field-initializers")

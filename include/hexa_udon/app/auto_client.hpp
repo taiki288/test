@@ -19,7 +19,7 @@ namespace hexa_udon::app {
 enum class RunMode { DryRun, Execute };
 enum class RunStatus { Completed, Stopped, RecoveryRequired, Failed };
 
-// 種別決めも毎日の計画も meet（include/hexa_udon/meet.hpp）で行う
+// 種別決めも毎日の計画も solver（include/hexa_udon/solver.hpp）で行う
 struct AutoClientConfig {
     std::string base_url;
     RunMode mode = RunMode::DryRun;

@@ -1,7 +1,7 @@
 // 最短経路（最速 / 燃料最小）（procon2026 の solvers/meet.cpp / common.hpp から移した。処理は元のまま）
-#include "hexa_udon/meet.hpp"
+#include "hexa_udon/solver.hpp"
 
-namespace hexa_udon::meet {
+namespace hexa_udon::solver {
 
 const PathTable& Router::get(int src, int mode) {
     auto it = tbl[mode].find(src);
@@ -64,4 +64,4 @@ vector<int> movesWithin(const vector<int>& cells, const vector<int>& status, int
     return acts;
 }
 
-}  // namespace hexa_udon::meet
+}  // namespace hexa_udon::solver

@@ -1,10 +1,10 @@
-#include "hexa_udon/meet.hpp"
+#include "hexa_udon/solver.hpp"
 #include "hexa_udon/simulator/simulator.hpp"
 
 #include <utility>
 #include <vector>
 
-// meet を o-udon の型で動かしたときの最低限の確認
+// solver を o-udon の型で動かしたときの最低限の確認
 int main() {
     using namespace hexa_udon;
     auto map = std::move(core::MapDefinition::create(8, 8,
@@ -13,14 +13,14 @@ int main() {
     const core::MatchConfig match{0, {60, 60}, {40, 40}, map,
         {{7, {9}, 2}, {11, {30}, 1}, {7, {45}, 1}},
         {{0}, {2}, {1}}, 20, 1, 1, 2};
-    meet::loadProblem(match);
-    if (meet::B != 2 || meet::rawBrand != std::vector<int>{7, 11}) return 1;
+    solver::loadProblem(match);
+    if (solver::B != 2 || solver::rawBrand != std::vector<int>{7, 11}) return 1;
 
-    // meet の方向は o-udon の盤の隣接と同じ
+    // solver の方向は o-udon の盤の隣接と同じ
     for (std::int32_t cell = 0; cell < 64; ++cell)
         for (int d = 0; d < 6; ++d) {
             const auto expected = map.neighbor({cell}, static_cast<core::Direction>(d));
-            if (meet::neighbor(cell, d) != (expected ? expected->value : -1)) return 2;
+            if (solver::neighbor(cell, d) != (expected ? expected->value : -1)) return 2;
         }
 
     // 巡回車 0 が右下に動いてスポット 9 に着く。補給車 2 も左下に動いて 9 に来るので、燃料は満タンに戻る
@@ -46,17 +46,17 @@ int main() {
     const simulator::DaySimulationInput empty_input{map, match.spots, match.fuel_limit, 40, empty, {}};
     if (simulator::simulate_day(empty_input, plan)) return 8;
 
-    // meet の計画は厳密なシミュレーションを通り、系列を全部取る
-    meet::today = 0;
-    const auto planned = meet::planDay(meet::agentsOf(agents), meet::statusOf({}), std::vector<char>(meet::B, 0),
+    // solver の計画は厳密なシミュレーションを通り、系列を全部取る
+    solver::today = 0;
+    const auto planned = solver::planDay(solver::agentsOf(agents), solver::statusOf({}), std::vector<char>(solver::B, 0),
                                        40, false, 200.0);
-    const auto checked = simulator::simulate_day(input, meet::toActionPlan(planned));
+    const auto checked = simulator::simulate_day(input, solver::toActionPlan(planned));
     if (!checked || checked.value().distinct_brands.size() != 2) return 9;
-    if (meet::fromActionPlan(meet::toActionPlan(planned)) != planned) return 10;
+    if (solver::fromActionPlan(solver::toActionPlan(planned)) != planned) return 10;
 
     // 種別決めは車の数だけ種別を返す
-    const auto kinds = meet::solveKind(300.0);
-    meet::choosingKinds = false;
+    const auto kinds = solver::solveKind(300.0);
+    solver::choosingKinds = false;
     if (kinds.size() != 3) return 11;
     return 0;
 }

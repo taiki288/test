@@ -1,7 +1,7 @@
 // 種別決め: 種別の候補ごとに全日程を回して比べる（procon2026 の solvers/meet.cpp / common.hpp から移した。処理は元のまま）
-#include "hexa_udon/meet.hpp"
+#include "hexa_udon/solver.hpp"
 
-namespace hexa_udon::meet {
+namespace hexa_udon::solver {
 
 vector<vector<int>> kindsWithSupplies(int k) {
     vector<vector<int>> out;
@@ -84,4 +84,4 @@ vector<int> solveKind(double timeMs) {
     return bestK;
 }
 
-}  // namespace hexa_udon::meet
+}  // namespace hexa_udon::solver

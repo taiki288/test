@@ -1,7 +1,7 @@
 // Day: 1 日の解の組み立てと評価（procon2026 の solvers/meet.cpp / common.hpp から移した。処理は元のまま）
-#include "hexa_udon/meet.hpp"
+#include "hexa_udon/solver.hpp"
 
-namespace hexa_udon::meet {
+namespace hexa_udon::solver {
 
 Day::Day(const vector<Agent>& st_, int steps_, int dayIndex_, Router& r, const vector<int>& patrolIds_,
     const vector<int>& supplyIds_, const vector<vector<int>>& brandSpots_)
@@ -374,7 +374,7 @@ Day::Eval Day::evaluate(const vector<vector<int>>& routes) {
     Eval e;
     e.plan = toPlan(routes);
     DayResult r = simulateDay(st, e.plan, router.status, steps);
-    if (!r.valid) { cerr << "[meet] 不正な計画: " << r.error << "\n"; return e; }
+    if (!r.valid) { cerr << "[solver] 不正な計画: " << r.error << "\n"; return e; }
     e.end = r.end;
     double score = E_BRAND * r.brands + r.balls;
     long long busy = 0, fuelLeft = 0;
@@ -392,4 +392,4 @@ Day::Eval Day::evaluate(const vector<vector<int>>& routes) {
     return e;
 }
 
-}  // namespace hexa_udon::meet
+}  // namespace hexa_udon::solver
