@@ -8,6 +8,39 @@ struct Planner {
     int steps;
     bool lastDay;
     Router router;
+    Router heavyRouter;  // 予測した翌日の道路（翌日の見積もり用）
+    // 翌日の道路の予測。道路の状態は前の 2 日の滞在の合計で決まるので、
+    //   2 日目は 1 日目の分に 2 日目の分が積もって重くなる（混雑・渋滞は渋滞に、渋滞の隣も重くなる）
+    //   3 日目以降、渋滞が 2 日続いた道路は避けられて軽くなり、今日初めて渋滞した道路はそのまま渋滞が続く
+    // 10 チームの試合（練習場くらいの重さ）で、翌日の状態ごとの割合が 3 割を超える重い方を取った表（重めに見る）
+    static vector<int> predicted(const vector<int>& status) {
+        vector<int> out = status;
+        // 2 日目（1 日目の道路）は 1 日分しか積もらないが、練習場では 1 日目の後に 3 割の道路が混雑になるので、全部混雑とみる
+        if (today == 0) {
+            for (int c = 0; c < NC; c++) if (cellType[c] == ROAD) out[c] = max(out[c], 1);
+            return out;
+        }
+        const bool hasYesterday = yesterdayDay == today - 1 && (int)yesterdayStatus.size() == NC;
+        for (int c = 0; c < NC; c++) {
+            if (cellType[c] != ROAD) continue;
+            int nb = 0;
+            for (int d = 0; d < 6; d++) {
+                int q = neighbor(c, d);
+                if (q >= 0 && cellType[q] == ROAD) nb = max(nb, status[q]);
+            }
+            const int s = status[c], y = hasYesterday ? yesterdayStatus[c] : 0;
+            if (today == 1) {
+                out[c] = s > 0 ? 2 : nb;
+            } else if (s == 0) {
+                out[c] = y == 2 ? (nb == 2 ? 2 : 1) : y == 1 ? (nb == 0 ? 0 : 1) : (nb == 2 ? 1 : 0);
+            } else if (s == 1) {
+                out[c] = y == 2 ? 2 : y == 1 ? 1 : (nb == 2 ? 2 : 1);
+            } else {
+                out[c] = y == 2 && nb <= 1 ? 1 : 2;
+            }
+        }
+        return out;
+    }
     vector<int> patrols, supplies;
     vector<vector<int>> brandSpots;
     vector<int> hubJump, hubCells;
@@ -24,7 +57,7 @@ struct Planner {
     long long iterations = 0;  // 焼きなましを回した回数（ログ用）
 
     Planner(const vector<Agent>& st_, const vector<int>& status, int steps_, bool last)
-        : st(st_), steps(steps_), lastDay(last), router(status), brandSpots(B) {
+        : st(st_), steps(steps_), lastDay(last), router(status), heavyRouter(predicted(status)), brandSpots(B) {
         for (int i = 0; i < NA; i++) (st[i].kind == 0 ? patrols : supplies).push_back(i);
         for (int s = 0; s < S; s++) brandSpots[spots[s].brand].push_back(s);
         for (int i : patrols) hubJump.push_back(st[i].pos);
@@ -44,16 +77,27 @@ struct Planner {
         next.setSchedule(sch);
         int missing;
         next.assignBrands(missing);
-        return tomorrowMemo[key] = missing;
+        // 予測した翌日の道路でも入るか。練習場では翌日の道路が今日より重くなることが多く、全員が 1 か所で終わると
+        // 同じ出口の道路でまとめて遅れて系列を落とすため、予測した道路で落ちる系列も軽く罰する
+        Day heavy(end, daySteps[today + 1], today + 1, heavyRouter, patrols, supplies, brandSpots);
+        heavy.setSchedule(sch);
+        int heavyMissing;
+        heavy.assignBrands(heavyMissing);
+        return tomorrowMemo[key] = missing * 1000 + max(0, heavyMissing - missing);
+    }
+    double tomorrowPenalty(const vector<Agent>& end) {
+        int v = tomorrowMisses(end);
+        return E_TOMORROW * (v / 1000) + E_TOMORROW_HEAVY * (v % 1000);
     }
 
-    double total(const Day::Eval& e) { return e.score < -1e17 ? e.score : e.score - E_TOMORROW * tomorrowMisses(e.end); }
-    double lastingTotal(const Day::Eval& e) { return e.lasting < -1e17 ? e.lasting : e.lasting - E_TOMORROW * tomorrowMisses(e.end); }
+    double total(const Day::Eval& e) { return e.score < -1e17 ? e.score : e.score - tomorrowPenalty(e.end); }
+    double lastingTotal(const Day::Eval& e) { return e.lasting < -1e17 ? e.lasting : e.lasting - tomorrowPenalty(e.end); }
 
-    // 動き終えた時刻の項を除いた評価が良くなったときだけ出し直すのは、今日の玉にも翌日にも効かない改善で出し直すと回答時間で負けるため
+    // 動き終えた時刻の項を除いた評価が良くなったときだけ出し直すのは、今日の玉にも翌日にも効かない改善で出し直すと回答時間で負けるため。
+    // 燃料の項のわずかな改善（EMIT_MIN_GAIN 未満）でも出し直さない。玉の変わらない出し直しのほとんどがこれで、回答時間が延びるため
     void emit(const vector<vector<int>>& plan, double lasting) {
         lock_guard<mutex> g(emitted->lock);
-        if (lasting <= emitted->lasting || lasting < -1e17) return;
+        if (lasting < emitted->lasting + EMIT_MIN_GAIN || lasting < -1e17) return;
         emitInterim(plan);
         emitted->lasting = lasting;
         emitted->plan = plan;
@@ -279,7 +323,7 @@ struct Planner {
             emit(best.plan, best.lasting);
             best = improve(best, timeMs - tm.ms());
             result = best;
-            if (interimSec > 0 && emitted->lasting >= best.lasting) return emitted->plan;
+            if (interimSec > 0 && emitted->lasting + EMIT_MIN_GAIN > best.lasting) return emitted->plan;
         }
         return best.plan;
     }
@@ -330,7 +374,7 @@ pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, c
     cerr << "]\n";
     if (results[bestK].score < -1e17) return {results[bestK], plans[0]};
     // 出し直した計画より良くなっていなければ、出し直した計画をそのまま返す（回答時間で負けないため）
-    if (interimSec > 0 && emitted.lasting >= results[bestK].lasting) return {results[bestK], emitted.plan};
+    if (interimSec > 0 && emitted.lasting + EMIT_MIN_GAIN > results[bestK].lasting) return {results[bestK], emitted.plan};
     return {results[bestK], results[bestK].plan};
 }
 
@@ -360,7 +404,10 @@ vector<vector<int>> planDay(const vector<Agent>& st, const vector<int>& status, 
         day0Plan.reset();
     }
     if (warm) cerr << "[solver] 1 日目が始まる前に作った解から始める\n";
-    return solveDay(st, status, steps, lastDay, timeMs, warm).second;
+    auto plan = solveDay(st, status, steps, lastDay, timeMs, warm).second;
+    // 翌日の予測のために今日の道路を覚えておく（種別決めのシミュレーションでは覚えない）
+    if (!choosingKinds) { yesterdayStatus = status; yesterdayDay = today; }
+    return plan;
 }
 
 void planDay0(const vector<int>& kinds, double timeMs) {

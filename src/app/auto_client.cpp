@@ -720,6 +720,23 @@ RunResult AutoCompetitionClient::run() {
             return {RunStatus::RecoveryRequired, "Day0 roads must be smooth"};
         }
         output_ << "daily-start day=" << daily.value().day << '\n';
+        // 翌日の道路の予測を練習場のデータで確かめるため、その日の混雑・渋滞の道路と他チームの朝の位置を残す
+        {
+            std::ostringstream busy, jammed;
+            for (const auto& road : daily.value().traffic) {
+                if (road.status == core::RoadStatus::Busy) busy << (busy.tellp() > 0 ? "," : "") << road.position.value;
+                if (road.status == core::RoadStatus::Jammed) jammed << (jammed.tellp() > 0 ? "," : "") << road.position.value;
+            }
+            output_ << "traffic day=" << daily.value().day << " busy=[" << busy.str() << "] jammed=[" << jammed.str() << "]\n";
+            output_ << "others day=" << daily.value().day << " pos=[";
+            bool first = true;
+            for (const auto& team : daily.value().other_teams)
+                for (const auto& agent : team.agents) {
+                    output_ << (first ? "" : ",") << agent.position.value;
+                    first = false;
+                }
+            output_ << "]\n";
+        }
 
         const bool already_done = config_.mode == RunMode::Execute
             ? competition.snapshot().accepted_days.contains(daily.value().day)
