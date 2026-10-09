@@ -44,7 +44,7 @@ vector<vector<int>> kindCandidates() {
     return cands;
 }
 
-MatchScore simulateMatch(const vector<int>& kinds, double timeMs) {
+MatchScore simulateMatch(const vector<int>& kinds, double timeMs, bool busy) {
     vector<Agent> st(NA);
     for (int i = 0; i < NA; i++) st[i] = {kinds[i], agentStart[i], FUEL_LIMIT};
     vector<char> collected(B, 0);
@@ -54,6 +54,8 @@ MatchScore simulateMatch(const vector<int>& kinds, double timeMs) {
         vector<long long> sum(NC, 0);
         for (int k = max(0, d - 2); k < d; k++) for (int p = 0; p < NC; p++) sum[p] += stays[k][p];
         vector<int> status = statusFromStay(sum, 1);
+        if (busy && d > 0)
+            for (int c = 0; c < NC; c++) if (cellType[c] == ROAD) status[c] = max(status[c], 1);
         today = d;
         auto plan = planDay(st, status, collected, daySteps[d], d == D - 1, timeMs / D);
         DayResult r = simulateDay(st, plan, status, daySteps[d]);
@@ -75,10 +77,16 @@ vector<int> solveKind(double timeMs) {
     for (size_t c = 0; c < cands.size(); c++) {
         double remain = timeMs - tm.ms();
         if (c > 0 && remain <= 0) { cerr << "[kind] 時間切れ: 残り " << cands.size() - c << " 候補を省略\n"; break; }
-        MatchScore ms = simulateMatch(cands[c], max(1.0, remain / (cands.size() - c)));
+        // 道路が順調な場合と、2 日目以降が全部混雑した場合の両方で回し、系列は悪い方、玉は合計で比べる。
+        // 練習場では他チームで道路が混み、順調な道路だけで比べると補給車の要る・要らないを見誤る一方、
+        // 混雑だけで比べると逆に見誤る試合もあるため、どちらでも系列を落とさない種別を選ぶ
+        const double each = max(1.0, remain / (cands.size() - c)) / 2;
+        MatchScore smooth = simulateMatch(cands[c], each), heavy = simulateMatch(cands[c], each, true);
+        MatchScore ms{min(smooth.matchBrands, heavy.matchBrands), min(smooth.dayBrands, heavy.dayBrands), smooth.balls + heavy.balls};
         cerr << "[kind] cand=" << c << " (";
         for (int k : cands[c]) cerr << k;
-        cerr << ") brands=" << ms.matchBrands << " dayBrands=" << ms.dayBrands << " balls=" << ms.balls << "\n";
+        cerr << ") brands=" << ms.matchBrands << " dayBrands=" << ms.dayBrands << " balls=" << ms.balls
+             << " (smooth " << smooth.dayBrands << "/" << smooth.balls << " busy " << heavy.dayBrands << "/" << heavy.balls << ")\n";
         if (c == 0 || best < ms) { best = ms; bestK = cands[c]; }
     }
     return bestK;
