@@ -379,8 +379,11 @@ Day::Eval Day::evaluate(const vector<vector<int>>& routes) {
     double score = E_BRAND * r.brands + r.balls;
     long long busy = 0, fuelLeft = 0;
     if (!lastDay) {
+        // 燃料は翌日に使う分（1 歩 1 燃料とみる）までしか数えない。それ以上を満タンにするために全員が補給車の
+        // ところで日を終えると、翌日に同じ場所から出て、道路が重い短い日に系列を落とすことがあるため
+        const int need = min(FUEL_LIMIT, daySteps[min(dayIndex + 1, D - 1)]);
         for (int i : patrolIds) {
-            fuelLeft += r.end[i].fuel;
+            fuelLeft += min(r.end[i].fuel, need);
             if (spotAt[r.end[i].pos] >= 0) score += E_END_SPOT;
         }
         score += 0.5 * fuelLeft / ((long long)P * FUEL_LIMIT + 1);
