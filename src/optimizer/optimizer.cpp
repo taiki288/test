@@ -255,7 +255,7 @@ struct Planner {
         long long iter = 0, accepted = 0, tries[OPS] = {}, gains[OPS] = {};
         double lastEmit = 0, lastBest = 0;
         while (tm.ms() < timeMs) {
-            if (interimSec > 0 && tm.ms() - lastEmit >= interimSec * 1000) { lastEmit = tm.ms(); emit(best.plan, best.lasting); }
+            if (interimSec > 0 && !choosingKinds && tm.ms() - lastEmit >= interimSec * 1000) { lastEmit = tm.ms(); emit(best.plan, best.lasting); }
             iter++;
             vector<vector<int>> next = cur.routes;
             auto sch = cur.schedule;
@@ -319,12 +319,12 @@ struct Planner {
             }
         }
         if (best.score < -1e17) return allWait(steps);
-        if (!choosingKinds) {
-            emit(best.plan, best.lasting);
-            best = improve(best, timeMs - tm.ms());
-            result = best;
-            if (interimSec > 0 && emitted->lasting + EMIT_MIN_GAIN > best.lasting) return emitted->plan;
-        }
+        // 種別決めの中でも焼きなましを回す（貪欲な組み立てだけで比べると、たまたま落とした系列で種別を見誤るため）。
+        // 種別決めの中では途中の計画を出さない
+        if (!choosingKinds) emit(best.plan, best.lasting);
+        best = improve(best, timeMs - tm.ms());
+        result = best;
+        if (!choosingKinds && interimSec > 0 && emitted->lasting + EMIT_MIN_GAIN > best.lasting) return emitted->plan;
         return best.plan;
     }
 };
@@ -336,9 +336,11 @@ namespace {
 // スレッド 0 は 1 本で解くときと同じ種を使う
 pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, const vector<int>& status, int steps,
                                                       bool lastDay, double timeMs, const optional<Planner::Solution>& warm) {
-    int T = choosingKinds ? 1 : max(1, threads);
+    // 種別決めの候補は 1 つずつ順に回すので、種別決めの中でも複数のスレッドで解ける
+    int T = max(1, threads);
     if (T == 1) {
         Planner p(st, status, steps, lastDay);
+        p.verbose = !choosingKinds;
         p.warm = warm;
         auto plan = p.plan(timeMs);
         return {p.result, plan};
@@ -355,7 +357,7 @@ pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, c
             rng.x ^= (uint64_t)k * 0x9E3779B97F4A7C15ULL;
             Planner p(st, status, steps, lastDay);
             p.emitted = &emitted;
-            p.verbose = k == 0;
+            p.verbose = k == 0 && !choosingKinds;
             p.warm = warm;
             plans[k] = p.plan(timeMs);
             results[k] = p.result;
@@ -365,13 +367,15 @@ pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, c
     int bestK = 0;
     for (int k = 1; k < T; k++) if (results[k].score > results[bestK].score) bestK = k;
     // スレッドごとの玉を並べて、種の違いでどれだけ差が出ているかを見られるようにする
-    cerr << "[solver] threads=" << T << " best=" << bestK << " score=" << results[bestK].score
-         << " iters=" << accumulate(iters.begin(), iters.end(), 0LL) << " balls=[";
-    for (int k = 0; k < T; k++) {
-        if (k) cerr << ",";
-        cerr << (results[k].plan.empty() ? -1 : simulateDay(st, results[k].plan, status, steps).balls);
+    if (!choosingKinds) {
+        cerr << "[solver] threads=" << T << " best=" << bestK << " score=" << results[bestK].score
+             << " iters=" << accumulate(iters.begin(), iters.end(), 0LL) << " balls=[";
+        for (int k = 0; k < T; k++) {
+            if (k) cerr << ",";
+            cerr << (results[k].plan.empty() ? -1 : simulateDay(st, results[k].plan, status, steps).balls);
+        }
+        cerr << "]\n";
     }
-    cerr << "]\n";
     if (results[bestK].score < -1e17) return {results[bestK], plans[0]};
     // 出し直した計画より良くなっていなければ、出し直した計画をそのまま返す（回答時間で負けないため）
     if (interimSec > 0 && emitted.lasting + EMIT_MIN_GAIN > results[bestK].lasting) return {results[bestK], emitted.plan};

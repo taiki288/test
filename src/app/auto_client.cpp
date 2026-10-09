@@ -568,8 +568,8 @@ RunResult AutoCompetitionClient::run() {
             : std::max<std::int64_t>(1000, deadline_seconds * 1000 - elapsed
                 - std::chrono::duration_cast<std::chrono::milliseconds>(config_.safety_margin).count());
         output_ << "type-selection=start mode=solver budgetMs=" << budget << '\n';
-        // procon2026 の solver と同じく持ち時間の 8 割で選ぶ
-        const auto kinds = solver::solveKind(static_cast<double>(budget) * 0.8);
+        // 持ち時間の半分で選ぶ（各候補に焼きなましを回す）。残りは 1 日目の先読みに使う
+        const auto kinds = solver::solveKind(static_cast<double>(budget) * 0.5);
         solver::choosingKinds = false;
         for (const int kind : kinds) selected_kinds.push_back(static_cast<core::AgentKind>(kind));
         protocol::OperationLogEntry selector_log;
